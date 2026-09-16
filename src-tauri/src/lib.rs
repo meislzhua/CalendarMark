@@ -51,7 +51,8 @@ pub fn run() {
             notion::notion_pull_entries,
             notion::notion_push_entries,
             notion::notion_archive_page,
-=======
+            notion::notion_search_pages,
+            notion::notion_create_database,
             get_window_work_area
         ])
         .setup(|_app| {

@@ -150,6 +150,20 @@ pub struct NotionPushResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionPageOption {
+    pub page_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionPageSearchResult {
+    pub pages: Vec<NotionPageOption>,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct PropertyDescriptor {
     name: String,
@@ -502,6 +516,173 @@ pub async fn notion_archive_page(token: String, page_id: String) -> Result<(), S
     )
     .await?;
     Ok(())
+}
+
+fn page_title(page: &Value) -> String {
+    if let Some(properties) = page.get("properties").and_then(Value::as_object) {
+        for property in properties.values() {
+            if property.get("type").and_then(Value::as_str) != Some("title") {
+                continue;
+            }
+            if let Some(title) = property.get("title").and_then(Value::as_array) {
+                let text = title
+                    .iter()
+                    .filter_map(|item| {
+                        item.get("plain_text")
+                            .or_else(|| item.get("text").and_then(|text| text.get("content")))
+                            .and_then(Value::as_str)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !text.trim().is_empty() {
+                    return text;
+                }
+            }
+        }
+    }
+    "未命名页面".to_string()
+}
+
+#[tauri::command]
+pub async fn notion_search_pages(token: String) -> Result<NotionPageSearchResult, String> {
+    let client = notion_client()?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("请先填写 Notion Integration Token。".to_string());
+    }
+
+    let mut pages = Vec::new();
+    let mut warnings = Vec::new();
+    let mut seen_cursors = HashSet::new();
+    let mut cursor: Option<String> = None;
+    let mut batches = 0usize;
+
+    loop {
+        batches += 1;
+        if batches > 100 {
+            warnings.push("Notion 返回了超过 10,000 个页面，已停止继续分页。".to_string());
+            break;
+        }
+
+        let mut body = Map::new();
+        body.insert("page_size".to_string(), json!(PAGE_SIZE));
+        body.insert(
+            "filter".to_string(),
+            json!({ "property": "object", "value": "page" }),
+        );
+        body.insert(
+            "sort".to_string(),
+            json!({ "direction": "descending", "timestamp": "last_edited_time" }),
+        );
+        if let Some(start_cursor) = cursor.as_ref() {
+            body.insert("start_cursor".to_string(), json!(start_cursor));
+        }
+
+        let response = request_json(
+            &client,
+            token,
+            Method::POST,
+            "/search",
+            Some(Value::Object(body)),
+        )
+        .await?;
+
+        if let Some(results) = response.get("results").and_then(Value::as_array) {
+            for page in results {
+                if page.get("object").and_then(Value::as_str) != Some("page") {
+                    continue;
+                }
+                let Some(raw_id) = page.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let page_id = match normalize_uuid(raw_id, "Notion page ID") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        warnings.push(error);
+                        continue;
+                    }
+                };
+                if pages.iter().any(|item: &NotionPageOption| item.page_id == page_id) {
+                    continue;
+                }
+                pages.push(NotionPageOption {
+                    page_id,
+                    title: page_title(page),
+                });
+            }
+        }
+
+        let has_more = response
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let next_cursor = response
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        if !has_more {
+            break;
+        }
+        let Some(next_cursor_value) = next_cursor else {
+            warnings.push("Notion 返回 has_more=true，但没有 next_cursor，已停止分页。".to_string());
+            break;
+        };
+        if !seen_cursors.insert(next_cursor_value.clone()) {
+            warnings.push("Notion 分页游标重复，已停止分页以避免重复读取。".to_string());
+            break;
+        }
+        cursor = Some(next_cursor_value);
+    }
+
+    Ok(NotionPageSearchResult { pages, warnings })
+}
+
+#[tauri::command]
+pub async fn notion_create_database(
+    token: String,
+    parent_page_id: String,
+    title: String,
+) -> Result<NotionConnectionInfo, String> {
+    let client = notion_client()?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("请先填写 Notion Integration Token。".to_string());
+    }
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("请填写新数据库的名称。".to_string());
+    }
+    let parent_page_id = normalize_uuid(&parent_page_id, "Notion parent page ID")?;
+
+    // Notion API 允许创建数据库，但父级必须是连接可访问的页面；
+    // 这里一次性创建 CalendarMark 需要的标准 schema。
+    let database = request_json(
+        &client,
+        token,
+        Method::POST,
+        "/databases",
+        Some(json!({
+            "parent": { "type": "page_id", "page_id": parent_page_id },
+            "title": [{ "type": "text", "text": { "content": title } }],
+            "properties": {
+                "名称": { "title": {} },
+                "日期": { "date": {} },
+                "内容": { "rich_text": {} },
+                "标签": { "multi_select": { "options": [] } },
+                "附件": { "files": {} }
+            }
+        })),
+    )
+    .await?;
+
+    let database_id = database
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Notion 创建数据库成功，但响应中缺少 Database ID。".to_string())?
+        .to_string();
+
+    let connected = connect_notion(&client, token, &database_id, None).await?;
+    Ok(connected.info)
 }
 
 fn notion_client() -> Result<Client, String> {

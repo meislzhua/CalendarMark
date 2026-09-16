@@ -81,14 +81,17 @@ import {
 import {
   archiveNotionPage,
   checkNotionConnection,
+  createNotionDatabase,
   discoverNotionDatasets,
   pullNotionEntries,
   pushNotionEntries,
+  searchNotionPages,
 } from './notion'
 import type {
   NotionConnectionInfo,
   NotionDatasetOption,
   NotionEntryRecord,
+  NotionPageOption,
   NotionPushResult,
 } from './notion'
 
@@ -1074,7 +1077,7 @@ function DataSourceIcon({ id }: { id: DataSourceId }) {
   return <Database size={17} />
 }
 
-type NotionBusyState = 'idle' | 'discovering' | 'checking' | 'pulling' | 'pushing'
+type NotionBusyState = 'idle' | 'discovering' | 'checking' | 'searching-pages' | 'creating'
 
 type NotionSourceSettingsProps = {
   settings: AppSettings
@@ -1087,6 +1090,10 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
   const [connection, setConnection] = useState<NotionConnectionInfo | null>(null)
   const [discoveredDatasets, setDiscoveredDatasets] = useState<NotionDatasetOption[]>([])
   const [busy, setBusy] = useState<NotionBusyState>('idle')
+  const [createOpen, setCreateOpen] = useState(false)
+  const [parentPages, setParentPages] = useState<NotionPageOption[]>([])
+  const [parentPageId, setParentPageId] = useState('')
+  const [newDatabaseTitle, setNewDatabaseTitle] = useState('')
   const savedDatasets = settings.notionDatasets ?? []
   const selectedDataset = getActiveNotionDataset(settings)
   const activeDatabaseId = selectedDataset?.databaseId ?? settings.notionDatabaseId.trim()
@@ -1175,11 +1182,63 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
     }
   }
 
+  async function handleSearchParentPages() {
+    if (!settings.notionToken.trim()) {
+      onNotice('请先填写 Integration Token，再选择父页面')
+      return
+    }
+    setBusy('searching-pages')
+    try {
+      const result = await searchNotionPages(settings.notionToken)
+      setParentPages(result.pages)
+      if (!parentPageId && result.pages.length > 0) {
+        setParentPageId(result.pages[0].pageId)
+      }
+      onNotice(formatSyncNotice(`找到 ${result.pages.length} 个可作为父级的页面`, result.warnings))
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function handleCreateDatabase() {
+    if (!settings.notionToken.trim()) {
+      onNotice('请先填写 Integration Token')
+      return
+    }
+    if (!parentPageId) {
+      onNotice('请先选择一个父页面；Notion API 要求新数据库必须挂在页面下')
+      return
+    }
+    if (!newDatabaseTitle.trim()) {
+      onNotice('请填写新数据库的名称')
+      return
+    }
+    setBusy('creating')
+    try {
+      const result = await createNotionDatabase(settings.notionToken, parentPageId, newDatabaseTitle.trim())
+      setConnection(result)
+      rememberConnection(result)
+      setCreateOpen(false)
+      setNewDatabaseTitle('')
+      onNotice(`已创建数据库「${result.databaseTitle}」，并自动添加到数据集`)
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy('idle')
+    }
+  }
+
   const busyLabel = busy === 'discovering'
     ? '正在发现可访问的数据集…'
     : busy === 'checking'
       ? '正在检查连接…'
-      : '远程直连：编辑后自动保存'
+      : busy === 'searching-pages'
+        ? '正在读取可访问的页面…'
+        : busy === 'creating'
+          ? '正在创建数据库…'
+          : '远程直连：编辑后自动保存'
   const mapping = connection?.mapping
 
   return <>
@@ -1193,8 +1252,32 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
       <div className="notion-dataset-manager">
         <div className="notion-dataset-header">
           <div><strong>同步数据集</strong><span>从 Token 可访问的 Notion data source 中选择</span></div>
-          <button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleDiscoverDatasets() }}><Search size={14} />{busy === 'discovering' ? '正在发现…' : '发现数据集'}</button>
+          <div className="notion-dataset-actions">
+            <button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleDiscoverDatasets() }}><Search size={14} />{busy === 'discovering' ? '正在发现…' : '发现数据集'}</button>
+            <button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { setCreateOpen((open) => !open); if (!createOpen && parentPages.length === 0) void handleSearchParentPages() }}><Plus size={14} />新建数据库</button>
+          </div>
         </div>
+        {createOpen && <div className="notion-create-panel">
+          <div className="notion-create-fields">
+            <label className="field-label" htmlFor="notion-parent-page"><span>父页面</span><span className="field-hint">Notion API 要求新数据库必须创建在某个页面下</span></label>
+            <div className="notion-parent-row">
+              <select id="notion-parent-page" className="settings-input" value={parentPageId} disabled={parentPages.length === 0} onChange={(event) => setParentPageId(event.target.value)}>
+                {parentPages.length === 0 && <option value="">暂无可用页面</option>}
+                {parentPages.map((page) => <option key={page.pageId} value={page.pageId}>{page.title}</option>)}
+              </select>
+              <button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleSearchParentPages() }}><RefreshCw size={14} className={busy === 'searching-pages' ? 'spin' : ''} />刷新页面</button>
+            </div>
+            <label className="field-label" htmlFor="notion-new-database-title"><span>数据库名称</span><span className="field-hint">会自动创建 名称 / 日期 / 内容 / 标签 / 附件 属性</span></label>
+            <input id="notion-new-database-title" className="settings-input" placeholder="例如：CalendarMark 日历" value={newDatabaseTitle} onChange={(event) => setNewDatabaseTitle(event.target.value)} />
+          </div>
+          <div className="notion-create-footer">
+            <span className="field-hint">创建后会自动添加为当前数据集</span>
+            <div className="notion-actions">
+              <button type="button" className="text-button" onClick={() => setCreateOpen(false)}>取消</button>
+              <button type="button" className="primary-button" disabled={busy !== 'idle' || !parentPageId || !newDatabaseTitle.trim()} onClick={() => { void handleCreateDatabase() }}>{busy === 'creating' ? '正在创建…' : '创建数据库'}</button>
+            </div>
+          </div>
+        </div>}
         {savedDatasets.length > 0
           ? <div className="notion-dataset-list">{savedDatasets.map((dataset) => {
             const active = notionDatasetKey(dataset) === activeDatasetKey

@@ -19,6 +19,16 @@ export type NotionDatasetOption = {
   dataSourceName: string
 }
 
+export type NotionPageOption = {
+  pageId: string
+  title: string
+}
+
+export type NotionPageSearchResult = {
+  pages: NotionPageOption[]
+  warnings: string[]
+}
+
 export type NotionDiscoveryResult = {
   datasets: NotionDatasetOption[]
   warnings: string[]
@@ -169,4 +179,22 @@ export async function pushNotionEntries(
 export async function archiveNotionPage(token: string, pageId: string): Promise<void> {
   ensureTauriRuntime()
   await invoke('notion_archive_page', { token, pageId })
+}
+
+export async function searchNotionPages(token: string): Promise<NotionPageSearchResult> {
+  ensureTauriRuntime()
+  return invoke<NotionPageSearchResult>('notion_search_pages', { token })
+}
+
+export async function createNotionDatabase(
+  token: string,
+  parentPageId: string,
+  title: string,
+): Promise<NotionConnectionInfo> {
+  ensureTauriRuntime()
+  return invoke<NotionConnectionInfo>('notion_create_database', {
+    token,
+    parentPageId,
+    title,
+  })
 }

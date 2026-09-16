@@ -3174,3 +3174,38 @@ button.toggle-switch:disabled {
 [data-ui-mode='drawer'] .ui-mode-options {
   grid-template-columns: 1fr;
 }
+
+/* --- Notion 新建数据库面板 --- */
+
+.notion-dataset-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.notion-create-panel {
+  margin-top: 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  padding: 14px;
+  background: var(--surface-muted);
+}
+
+.notion-create-fields {
+  display: grid;
+  gap: 6px;
+}
+
+.notion-parent-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.notion-create-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
