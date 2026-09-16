@@ -10,8 +10,8 @@ CalendarMark 是一个基于 Tauri 2 的本地优先日历记录工具：用标�
 - **日期记录**：标题、正文、快捷标签，以及图片、TXT、Markdown、PDF 附件。
 - **右侧抽屉**：点击日期打开编辑抽屉，带遮罩和滑入/滑出动画，不打断当前日历上下文。
 - **快捷标签**：预置标签可一键切换，也可在抽屉或设置中创建、删除。
-- **桌面入口**：Windows/macOS 使用托盘菜单打开主界面、打开设置或退出；关闭窗口默认隐藏到托盘。
-- **全局快捷键**：默认 `Ctrl/Cmd + Shift + Space`，可在设置中修改。
+- **桌面入口**：Windows/macOS 使用托盘菜单打开主界面、打开设置或退出；关闭窗口默认隐藏到托盘；可在系统设置中开启开机启动。
+- **全局快捷键**：默认 `Ctrl/Cmd + Shift + Space`；在系统设置中点击“读取组合键”后直接按下按键即可录制新组合。
 - **可替换数据源**：设置页提供 Notion、本地存储和后续数据源的统一选择入口；Notion 是当前已实现的外部适配器。
 - **Notion 数据源**：选中 Notion 即远程直连，读取、保存和删除直接作用于远端；选中本地存储时，可在设置中对已配置的 Notion 数据集执行“拉取到本地 / 推送到 Notion”。
 - **本地优先**：MVP 使用 WebView 本地存储保存草稿，不依赖服务端即可使用。
@@ -23,7 +23,7 @@ CalendarMark 是一个基于 Tauri 2 的本地优先日历记录工具：用标�
 | UI | React 19 + TypeScript + Vite |
 | 桌面壳 | Tauri 2 + Rust |
 | 交互图标 | lucide-react |
-| 桌面能力 | Tauri tray icon、global-shortcut、window/event API |
+| 桌面能力 | Tauri tray icon、global-shortcut、autostart、window/event API |
 | CI/CD | GitHub Actions + tauri-apps/tauri-action |
 | 目标平台 | Windows、macOS、Android（Android Action 中初始化生成工程） |
 
@@ -44,7 +44,7 @@ npm install
 npm run dev
 ```
 
-打开 Vite 输出的地址即可预览全部 UI；浏览器模式不会注册系统全局快捷键，但其他日历/抽屉/设置交互仍可使用。
+打开 Vite 输出的地址即可预览全部 UI；浏览器模式不会注册系统全局快捷键和开机启动，但其他日历/抽屉/设置交互仍可使用。
 
 ### Tauri 桌面开发
 
@@ -116,14 +116,15 @@ Android job 会安装 JDK 17、Android SDK platform/build-tools/NDK，并使用 
 
 1. CalendarMark 启动或切换数据集时自动读取远端页面，日历展示的是当前 Notion 数据。
 2. 保存记录会直接创建或更新 Notion 页面；本地附件会直接上传到 Notion File Upload API。
-3. 删除记录会直接将对应 Notion 页面移入回收站。
-4. 远程模式不会把记录和标签写入本机的 entries/tags localStorage。
-5. 修改 Token 或点击“重新读取”时会重新读取当前数据集；读取请求带短防抖，输入 Token 不会逐字符发起请求。
+3. 附件首次上传后会保存 Notion 返回的 file upload ID，再次编辑同一条记录时直接复用引用，不会重复上传文件。
+4. 删除记录会直接将对应 Notion 页面移入回收站。
+5. 远程模式不会把记录和标签写入本机的 entries/tags localStorage。
+6. 日历总览工具栏和设置页都提供“重新读取”入口；修改 Token 或点击刷新时会重新读取当前数据集，读取请求带短防抖，输入 Token 不会逐字符发起请求。
 
 选择本地存储作为当前数据源时：
 
 1. 日历继续使用本机数据，保存只写入本地。
-2. 在“本地存储”设置下方选择已配置的 Notion 数据集，可点击“拉取到本地”或“推送到 Notion”。
+2. “本地存储”下方只列出本机已绑定的 Notion 数据集；选择同步目标后可点击“拉取到本地”或“推送到 Notion”。Token、数据集发现和连接引导统一放在 Notion 数据源页配置。
 3. 本地模式的删除只删除本地记录，不会因为删除本地记录而自动归档远端页面；需要时再显式推送本地数据。
 
 ## 当前边界

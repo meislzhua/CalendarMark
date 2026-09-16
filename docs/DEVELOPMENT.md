@@ -47,9 +47,15 @@ Notion 已由 `src-tauri/src/notion.rs` 通过 Rust HTTP client 接入，React �
 - 选定数据集后调用 Retrieve a database / Retrieve a data source 读取 schema；数据库包含多个 data source 时仍可从连接结果切换。旧版本只保存 Database ID 的设置仍可兼容读取，并会在成功连接后迁移到数据集列表。
 - 字段映射按属性类型优先、按中文/英文名称辅助识别：`title` + `date` 为必需，`rich_text` / `multi_select` / `files` 为可选。
 - 查询使用 cursor 分页；429 和 5xx 最多做三次短退避重试。
-- 写入时根据本地 `remote.id` 选择创建或更新页面；附件先创建 File Upload，再通过 multipart 上传并写入 `files` 属性。
+- 写入时根据本地 `remote.id` 选择创建或更新页面；附件优先复用已有的 file upload ID / external 引用，只有新附件才创建 File Upload 并通过 multipart 上传。推送结果会回传每个附件的稳定引用，前端在 `applyPushResultToEntry` 中按索引合并保存，后续编辑不再重复上传。
 - `AppSettings.dataSource=notion` 是远程直连模式：App 在启动、切换数据集或点击“重新读取”时调用查询命令，保存和删除直接调用 Notion；自动读取带 500ms 防抖，避免逐字符输入 Token 时重复请求。
 - `AppSettings.dataSource=local` 才显示显式“拉取到本地 / 推送到 Notion”按钮；两种模式都不做后台自动覆盖，冲突和可选字段缺失通过同步警告反馈给用户。
+
+### 系统能力
+
+- 开机启动由 `tauri-plugin-autostart` 实现，插件只在桌面目标初始化；能力文件只授权 `enable/disable/is-enabled` 三个命令。
+- `src/tauri.ts` 中的 `readAutostartEnabled` / `setAutostartEnabled` 负责浏览器和移动端降级，UI 层不需要重复判断平台。
+- 快捷键录制在 `SystemSettings` 中通过捕获型 `keydown` 监听实现：至少一个 Ctrl/Cmd/Alt 修饰键 + 普通按键才生成合法 accelerator，Esc 取消录制。
 
 本地可以使用单元测试验证字段映射和 ID 规范化：
 

@@ -21,7 +21,7 @@
               Windows / macOS / Android targets
 ```
 
-前端保持可在浏览器运行，因此视觉和常规交互不依赖 Tauri。`src/tauri.ts` 只在检测到 Tauri runtime 后调用窗口和全局快捷键 API，浏览器预览会优雅降级。
+前端保持可在浏览器运行，因此视觉和常规交互不依赖 Tauri。`src/tauri.ts` 只在检测到 Tauri runtime 后调用窗口、全局快捷键和开机启动 API，浏览器预览会优雅降级。
 
 ## 2. 前端模块
 
@@ -44,6 +44,7 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 - `showMainWindow()`：显示并聚焦主窗口。
 - `toggleMainWindow()`：为未来托盘/快捷入口保留的切换能力。
 - `registerGlobalShortcut()`：处理快捷键注册、修改时注销旧组合、浏览器降级。
+- `readAutostartEnabled()` / `setAutostartEnabled()`：包装 autostart 插件；仅桌面 runtime 可用，浏览器和移动端返回不可用状态。
 - `listenForSettingsOpen()`：接收 Rust 托盘发出的 `calendar-mark:open-settings` 事件。
 
 ### `src/notion.ts`
@@ -54,12 +55,14 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 
 当前 MVP 使用单一页面状态管理，`view` 区分日历/设置，`drawerOpen` 控制记录抽屉。`dataSource=notion` 时，页面启动、切换数据集或点击“重新读取”会自动查询远端（查询前有 500ms 防抖，合并 Token 输入等连续变化），编辑保存和删除直接调用 Notion；`dataSource=local` 时加载/保存 `localStorage`，并在本地数据源配置中提供显式远程同步。
 
+设置页分为数据源、系统、界面和标签管理四个分区。系统设置包含开机启动开关（autostart 插件）和全局快捷键；快捷键通过“读取组合键”按钮捕获下一次按键组合生成 Tauri accelerator（至少需要一个 Ctrl/Cmd/Alt 修饰键，Esc 取消），不再依赖手工输入。日历总览工具栏在远程直连模式下提供刷新按钮，等价于设置页的“重新读取”。本地存储的数据源卡片只列出已绑定的 Notion 数据集并保留拉取/推送按钮，Token、数据集发现和连接引导统一放在 Notion 数据源页。
+
 ## 3. Rust/Tauri 模块
 
 `src-tauri/src/lib.rs` 的职责保持窄小：
 
 1. 初始化日志插件。
-2. 桌面目标初始化全局快捷键插件。
+2. 桌面目标初始化全局快捷键和 autostart 插件。
 3. 创建托盘图标和菜单。
 4. 托盘“打开”调用 `show_main_window`。
 5. 托盘“设置”显示窗口并 emit `calendar-mark:open-settings`。
@@ -74,7 +77,7 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 - `Retrieve a data source`：读取 schema，并按属性类型自动识别 title、date、rich_text、multi_select、files。
 - `POST /data_sources/{id}/query`：分页拉取页面，处理游标重复和异常分页响应。
 - `POST /pages` / `PATCH /pages/{id}`：创建或更新日历记录对应的页面；远程直连模式在单条记录保存时调用，本地模式由显式推送调用。
-- `POST /file_uploads` + multipart send：上传本地 Data URL 附件并将 file upload ID 写入 files 属性。
+- `POST /file_uploads` + multipart send：上传本地 Data URL 附件并将 file upload ID 写入 files 属性；推送结果会回传每个附件的稳定引用（file upload ID / external 链接），前端保存后再次编辑时优先复用引用，不会重复上传同一文件。
 - `PATCH /pages/{id}` with `in_trash=true`：删除本地远端关联记录时归档页面。
 - 对 429 和 5xx 做最多三次短退避重试，错误消息只返回 Notion 的状态和 message，不输出 Token。
 
@@ -148,7 +151,7 @@ Notion 远程直连
 
 ## 6. 权限和安全
 
-- `src-tauri/capabilities/default.json` 只开放 core 默认能力以及全局快捷键 register/unregister。
+- `src-tauri/capabilities/default.json` 只开放 core 默认能力、全局快捷键 register/unregister 以及 autostart 的 enable/disable/is-enabled。
 - 不打开 shell、任意文件系统或任意远程 URL 权限。
 - CSP 当前为 `null` 以支持 Vite/Tauri MVP；Notion 请求已经放入 Rust，生产发布仍应收紧 WebView CSP。
 - 当前 Token 随 `AppSettings` 保存在 WebView localStorage，方便 MVP 使用但不是系统级密钥链；正式发布前应迁移到 Tauri Store 的安全后端或系统 Keychain。
