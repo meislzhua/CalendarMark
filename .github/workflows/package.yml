@@ -3,7 +3,6 @@ name: Package CalendarMark
 on:
   workflow_dispatch:
   push:
-    branches: [main]
     tags: ['v*']
 
 permissions:
@@ -153,16 +152,11 @@ jobs:
         run: npm ci
       - name: Initialize Android project
         run: npx tauri android init --ci --skip-targets-install
-      - name: Build Android APKs
+      - name: Build Android APKs + AAB
         shell: bash
         run: |
           set -o pipefail
-          npx tauri android build --ci --apk --split-per-abi --verbose 2>&1 | tee android-apk-build.log
-      - name: Build Android AAB
-        shell: bash
-        run: |
-          set -o pipefail
-          npx tauri android build --ci --aab --verbose 2>&1 | tee android-aab-build.log
+          npx tauri android build --ci --apk --aab --split-per-abi --verbose 2>&1 | tee android-build.log
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -184,4 +178,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: CalendarMark-android-build-logs
-          path: '*-build.log'
+          path: '*android-build.log'
