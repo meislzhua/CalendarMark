@@ -48,7 +48,7 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 
 ### `src/notion.ts`
 
-只负责 Tauri IPC 的类型和调用封装：检查连接、拉取页面、推送记录和归档页面。浏览器预览不会直接访问 Notion；点击同步按钮时会提示需要使用 Tauri 桌面版或 Android 版。
+只负责 Tauri IPC 的类型和调用封装：发现数据集、检查连接、拉取页面、推送记录和归档页面。浏览器预览不会直接访问 Notion；点击同步按钮时会提示需要使用 Tauri 桌面版或 Android 版。
 
 ### `src/App.tsx`
 
@@ -69,7 +69,8 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 
 `src-tauri/src/notion.rs` 使用 `reqwest` + Rustls 调用 Notion REST API，当前实现：
 
-- `Retrieve a database`：根据 Database ID 发现所有 `data_sources`，允许用户选择目标 data source。
+- `POST /search`：按 `object=data_source` 过滤当前 Token 可访问的数据源，分页读取并补充所属 Database 名称。
+- `Retrieve a database`：根据选中的 Database ID 发现所有 `data_sources`，兼容旧配置并允许用户切换目标 data source。
 - `Retrieve a data source`：读取 schema，并按属性类型自动识别 title、date、rich_text、multi_select、files。
 - `POST /data_sources/{id}/query`：分页拉取页面，处理游标重复和异常分页响应。
 - `POST /pages` / `PATCH /pages/{id}`：创建或更新本地记录对应的页面。
@@ -115,24 +116,24 @@ type Attachment = {
 
 ```text
 DataSourceDefinition[]
-├── Notion          active   → Token / Database ID / data source / 同步操作
+├── Notion          active   → Token / 数据集发现与选择 / 同步操作
 ├── 本地存储         active   → 无需配置
 ├── WebDAV           planned
 └── Obsidian Vault   planned
 ```
 
-`AppSettings.dataSource` 只保存当前选择，Notion 专属字段保存 `notionToken`、`notionDatabaseId` 和用户选中的 `notionDataSourceId`。这样切换到其他 provider 时不会丢弃已有 Notion 配置，也不会把外部数据源的字段塞进一个不可扩展的通用表单。
+`AppSettings.dataSource` 只保存当前选择，Notion 专属字段保存 `notionToken`、当前选中的 `notionDatabaseId` / `notionDataSourceId`，以及可切换的 `notionDatasets` 本地列表。Database/Data source ID 仍作为同步适配器的内部引用和旧配置兼容字段，但设置界面不再要求用户手工填写。
 
 Notion 同步路径如下：
 
 ```text
-Database ID
+Integration Token
     │
     ▼
-Retrieve database ── discover data_sources ── select data source
+Search data_sources ── add to local list ── select dataset
     │                                          │
     ▼                                          ▼
-Retrieve schema ── property mapping      query pages (cursor pagination)
+Retrieve database / schema ── property mapping ── query pages
     │                                          │
     └─────────────── connection result ────────┘
                          │

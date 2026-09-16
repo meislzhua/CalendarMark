@@ -38,12 +38,13 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 ## 4. Notion 开发约定
 
-Notion 已由 `src-tauri/src/notion.rs` 通过 Rust HTTP client 接入，React 只通过 `src/notion.ts` 发起 IPC 调用。设置页会引导用户创建 Internal connection、分享目标数据库并提取 Database ID。
+Notion 已由 `src-tauri/src/notion.rs` 通过 Rust HTTP client 接入，React 只通过 `src/notion.ts` 发起 IPC 调用。设置页会引导用户创建 Internal connection、分享目标数据库，然后用 Token 自动发现和选择数据集。
 
 - 不在 React 前端直接调用 Notion API。
 - 不把 Integration Token 写入日志、错误 toast 或 GitHub Actions 输出；请求错误只返回 HTTP 状态和 Notion message。
 - 当前 Token 为了 MVP 体验保存在 WebView localStorage，正式发布前应迁移到 Tauri Store 的安全后端或系统 Keychain。
-- 使用 Database ID 先调用 Retrieve a database，发现 data source ID，再读取 data source schema；数据库包含多个 data source 时由用户选择。
+- 点击“发现数据集”时使用 `POST /search` 的 `object=data_source` 过滤器和游标分页，列出当前 Token 可访问的数据源；用户添加的数据集保存在 `AppSettings.notionDatasets`，可以保存多个并切换。
+- 选定数据集后调用 Retrieve a database / Retrieve a data source 读取 schema；数据库包含多个 data source 时仍可从连接结果切换。旧版本只保存 Database ID 的设置仍可兼容读取，并会在成功连接后迁移到数据集列表。
 - 字段映射按属性类型优先、按中文/英文名称辅助识别：`title` + `date` 为必需，`rich_text` / `multi_select` / `files` 为可选。
 - 查询使用 cursor 分页；429 和 5xx 最多做三次短退避重试。
 - 推送时根据本地 `remote.id` 选择创建或更新页面；附件先创建 File Upload，再通过 multipart 上传并写入 `files` 属性。

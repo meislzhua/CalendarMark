@@ -20,7 +20,6 @@ import {
   KeyRound,
   Keyboard,
   Layers3,
-  Link2,
   Monitor,
   Moon,
   MoreHorizontal,
@@ -54,6 +53,7 @@ import type {
   Attachment,
   CalendarEntry,
   DataSourceId,
+  NotionDataset,
   Tag,
 } from './types'
 import {
@@ -73,11 +73,13 @@ import {
 import {
   archiveNotionPage,
   checkNotionConnection,
+  discoverNotionDatasets,
   pullNotionEntries,
   pushNotionEntries,
 } from './notion'
 import type {
   NotionConnectionInfo,
+  NotionDatasetOption,
   NotionEntryRecord,
   NotionPushResult,
 } from './notion'
@@ -588,7 +590,11 @@ function DataSourceIcon({ id }: { id: DataSourceId }) {
   return <Database size={17} />
 }
 
-type NotionBusyState = 'idle' | 'checking' | 'pulling' | 'pushing'
+type NotionBusyState = 'idle' | 'discovering' | 'checking' | 'pulling' | 'pushing'
+
+function notionDatasetKey(dataset: Pick<NotionDataset, 'databaseId' | 'dataSourceId'>): string {
+  return `${dataset.databaseId}:${dataset.dataSourceId}`
+}
 
 type NotionSourceSettingsProps = {
   settings: AppSettings
@@ -602,20 +608,98 @@ type NotionSourceSettingsProps = {
 
 function NotionSourceSettings({ settings, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onNotice }: NotionSourceSettingsProps) {
   const [connection, setConnection] = useState<NotionConnectionInfo | null>(null)
+  const [discoveredDatasets, setDiscoveredDatasets] = useState<NotionDatasetOption[]>([])
   const [busy, setBusy] = useState<NotionBusyState>('idle')
-  const isConfigured = Boolean(settings.notionToken.trim() && settings.notionDatabaseId.trim())
+  const savedDatasets = settings.notionDatasets ?? []
+  const selectedDataset = savedDatasets.find((dataset) => notionDatasetKey(dataset) === `${settings.notionDatabaseId}:${settings.notionDataSourceId}`)
+    ?? savedDatasets.find((dataset) => dataset.databaseId === settings.notionDatabaseId)
+    ?? (settings.notionDatabaseId.trim() ? undefined : savedDatasets[0])
+  const activeDatabaseId = selectedDataset?.databaseId ?? settings.notionDatabaseId.trim()
+  const activeDataSourceId = selectedDataset?.dataSourceId ?? settings.notionDataSourceId.trim()
+  const activeDatasetKey = activeDatabaseId ? notionDatasetKey({ databaseId: activeDatabaseId, dataSourceId: activeDataSourceId }) : ''
+  const isConfigured = Boolean(settings.notionToken.trim() && activeDatabaseId)
   const update = (partial: Partial<AppSettings>) => onChangeSettings({ ...settings, ...partial })
+
+  function rememberDataset(dataset: NotionDataset) {
+    const nextDatasets = [
+      ...savedDatasets.filter((item) => notionDatasetKey(item) !== notionDatasetKey(dataset)),
+      dataset,
+    ]
+    update({
+      notionDatasets: nextDatasets,
+      notionDatabaseId: dataset.databaseId,
+      notionDataSourceId: dataset.dataSourceId,
+    })
+  }
+
+  function rememberConnection(info: NotionConnectionInfo) {
+    rememberDataset({
+      databaseId: info.databaseId,
+      databaseTitle: info.databaseTitle,
+      dataSourceId: info.dataSourceId,
+      dataSourceName: info.dataSourceName,
+    })
+  }
+
+  async function handleDiscoverDatasets() {
+    if (!settings.notionToken.trim()) {
+      onNotice('请先填写 Integration Token，再发现可访问的数据集')
+      return
+    }
+    setBusy('discovering')
+    try {
+      const result = await discoverNotionDatasets(settings.notionToken)
+      setDiscoveredDatasets(result.datasets)
+      onNotice(formatSyncNotice(`发现 ${result.datasets.length} 个可访问的数据集`, result.warnings))
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  function handleAddDataset(dataset: NotionDatasetOption) {
+    rememberDataset(dataset)
+    setConnection(null)
+    onNotice(`已添加数据集：${dataset.databaseTitle} / ${dataset.dataSourceName}`)
+  }
+
+  function handleSelectDataset(dataset: NotionDataset) {
+    update({
+      notionDatabaseId: dataset.databaseId,
+      notionDataSourceId: dataset.dataSourceId,
+    })
+    setConnection(null)
+    onNotice(`已切换数据集：${dataset.databaseTitle} / ${dataset.dataSourceName}`)
+  }
+
+  function handleRemoveDataset(dataset: NotionDataset) {
+    const nextDatasets = savedDatasets.filter((item) => notionDatasetKey(item) !== notionDatasetKey(dataset))
+    const removingActive = notionDatasetKey(dataset) === activeDatasetKey
+    const nextDataset = removingActive ? nextDatasets[0] : undefined
+    update({
+      notionDatasets: nextDatasets,
+      ...(removingActive
+        ? {
+            notionDatabaseId: nextDataset?.databaseId ?? '',
+            notionDataSourceId: nextDataset?.dataSourceId ?? '',
+          }
+        : {}),
+    })
+    setConnection(null)
+    onNotice(`已从 CalendarMark 移除数据集「${dataset.dataSourceName}」（不会删除 Notion 内容）`)
+  }
 
   async function handleCheckConnection() {
     if (!isConfigured) {
-      onNotice('请先填写 Token 和 Database ID')
+      onNotice('请先填写 Token，点击“发现数据集”并添加一个数据集')
       return
     }
     setBusy('checking')
     try {
-      const result = await checkNotionConnection(settings.notionToken, settings.notionDatabaseId, settings.notionDataSourceId)
+      const result = await checkNotionConnection(settings.notionToken, activeDatabaseId, activeDataSourceId)
       setConnection(result)
-      if (result.dataSourceId !== settings.notionDataSourceId) update({ notionDataSourceId: result.dataSourceId })
+      rememberConnection(result)
       onNotice(`Notion 已连接：${result.dataSourceName}`)
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error))
@@ -626,17 +710,17 @@ function NotionSourceSettings({ settings, onChangeSettings, entries, onChangeEnt
 
   async function handlePull() {
     if (!isConfigured) {
-      onNotice('请先填写 Token 和 Database ID')
+      onNotice('请先填写 Token，点击“发现数据集”并添加一个数据集')
       return
     }
     setBusy('pulling')
     try {
-      const result = await pullNotionEntries(settings.notionToken, settings.notionDatabaseId, settings.notionDataSourceId)
+      const result = await pullNotionEntries(settings.notionToken, activeDatabaseId, activeDataSourceId)
       const merged = mergeNotionEntries(result.entries, entries, tags)
       onChangeTags(merged.tags)
       onChangeEntries(merged.entries)
       setConnection(result.connection)
-      if (result.connection.dataSourceId !== settings.notionDataSourceId) update({ notionDataSourceId: result.connection.dataSourceId })
+      rememberConnection(result.connection)
       onNotice(formatSyncNotice(`已从 Notion 拉取 ${result.entries.length} 条记录`, result.warnings))
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error))
@@ -647,7 +731,7 @@ function NotionSourceSettings({ settings, onChangeSettings, entries, onChangeEnt
 
   async function handlePush() {
     if (!isConfigured) {
-      onNotice('请先填写 Token 和 Database ID')
+      onNotice('请先填写 Token，点击“发现数据集”并添加一个数据集')
       return
     }
     setBusy('pushing')
@@ -655,8 +739,8 @@ function NotionSourceSettings({ settings, onChangeSettings, entries, onChangeEnt
       const tagNames = new Map(tags.map((tag) => [tag.id, tag.name]))
       const result = await pushNotionEntries(
         settings.notionToken,
-        settings.notionDatabaseId,
-        settings.notionDataSourceId,
+        activeDatabaseId,
+        activeDataSourceId,
         entries.map((entry) => ({
           localId: entry.id,
           remoteId: entry.remote?.provider === 'notion' ? entry.remote.id : undefined,
@@ -669,7 +753,7 @@ function NotionSourceSettings({ settings, onChangeSettings, entries, onChangeEnt
       )
       applyPushResult(result, onChangeEntries, entries)
       setConnection(result.connection)
-      if (result.connection.dataSourceId !== settings.notionDataSourceId) update({ notionDataSourceId: result.connection.dataSourceId })
+      rememberConnection(result.connection)
       onNotice(formatSyncNotice(`已推送 ${result.entries.length} 条本地记录`, result.warnings))
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error))
@@ -678,7 +762,15 @@ function NotionSourceSettings({ settings, onChangeSettings, entries, onChangeEnt
     }
   }
 
-  const busyLabel = busy === 'checking' ? '正在检查连接…' : busy === 'pulling' ? '正在从 Notion 拉取…' : busy === 'pushing' ? '正在推送本地记录…' : '连接状态：未检查'
+  const busyLabel = busy === 'discovering'
+    ? '正在发现可访问的数据集…'
+    : busy === 'checking'
+      ? '正在检查连接…'
+      : busy === 'pulling'
+        ? '正在从 Notion 拉取…'
+        : busy === 'pushing'
+          ? '正在推送本地记录…'
+          : '连接状态：未检查'
   const mapping = connection?.mapping
 
   return <>
@@ -687,16 +779,42 @@ function NotionSourceSettings({ settings, onChangeSettings, entries, onChangeEnt
       <div className="source-divider" />
       <div className="source-fields">
         <label className="field-label" htmlFor="notion-token"><span>Integration Token</span><span className="field-hint"><KeyRound size={12} />仅保存在本机</span></label>
-        <input id="notion-token" className="settings-input" type="password" placeholder="secret_… 或 ntn_…" value={settings.notionToken} onChange={(event) => { update({ notionToken: event.target.value }); setConnection(null) }} />
-        <label className="field-label" htmlFor="notion-database"><span>Database ID</span><span className="field-hint"><Link2 size={12} />从数据库链接中复制</span></label>
-        <input id="notion-database" className="settings-input" placeholder="32 位 Database ID" value={settings.notionDatabaseId} onChange={(event) => { update({ notionDatabaseId: event.target.value, notionDataSourceId: '' }); setConnection(null) }} />
+        <input id="notion-token" className="settings-input" type="password" placeholder="secret_… 或 ntn_…" value={settings.notionToken} onChange={(event) => { update({ notionToken: event.target.value }); setConnection(null); setDiscoveredDatasets([]) }} />
       </div>
-      {connection && connection.dataSources.length > 1 && <div className="notion-data-source-picker"><label className="field-label" htmlFor="notion-data-source"><span>Data source</span><span className="field-hint">该数据库包含多个数据源</span></label><select id="notion-data-source" className="settings-input" value={settings.notionDataSourceId} onChange={(event) => { update({ notionDataSourceId: event.target.value }); setConnection(null) }}>{connection.dataSources.map((source) => <option key={source.id} value={source.id}>{source.name} · {source.id}</option>)}</select></div>}
+      <div className="notion-dataset-manager">
+        <div className="notion-dataset-header">
+          <div><strong>同步数据集</strong><span>从 Token 可访问的 Notion data source 中选择</span></div>
+          <button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleDiscoverDatasets() }}><Search size={14} />{busy === 'discovering' ? '正在发现…' : '发现数据集'}</button>
+        </div>
+        {savedDatasets.length > 0
+          ? <div className="notion-dataset-list">{savedDatasets.map((dataset) => {
+            const active = notionDatasetKey(dataset) === activeDatasetKey
+            return <div className={'notion-dataset-option' + (active ? ' notion-dataset-option--active' : '')} key={notionDatasetKey(dataset)}>
+              <button type="button" className="notion-dataset-select" onClick={() => handleSelectDataset(dataset)}>
+                <span className="notion-dataset-copy"><strong>{dataset.databaseTitle}</strong><small>{dataset.dataSourceName}</small><code>{dataset.dataSourceId}</code></span>
+                {active && <span className="notion-dataset-current">当前</span>}
+              </button>
+              <button type="button" className="plain-icon-button" aria-label={'移除 ' + dataset.dataSourceName} title="从本机移除" onClick={() => handleRemoveDataset(dataset)}><Trash2 size={14} /></button>
+            </div>
+          })}</div>
+          : <div className="notion-dataset-empty">还没有添加数据集。点击“发现数据集”读取当前 Token 已授权的 Notion 数据源。</div>}
+        {discoveredDatasets.length > 0 && <div className="notion-discovered-panel">
+          <div className="notion-discovered-heading"><strong>发现结果</strong><span>添加后会保存在本机，移除不会删除 Notion 内容</span></div>
+          <div className="notion-discovered-list">{discoveredDatasets.map((dataset) => {
+            const saved = savedDatasets.some((item) => notionDatasetKey(item) === notionDatasetKey(dataset))
+            return <div className="notion-discovered-item" key={notionDatasetKey(dataset)}>
+              <div className="notion-discovered-copy"><strong>{dataset.databaseTitle}</strong><small>{dataset.dataSourceName}</small></div>
+              <button type="button" className={saved ? 'secondary-button' : 'primary-button'} disabled={saved || busy !== 'idle'} onClick={() => handleAddDataset(dataset)}>{saved ? '已添加' : '添加数据集'}</button>
+            </div>
+          })}</div>
+        </div>}
+      </div>
+      {connection && connection.dataSources.length > 1 && <div className="notion-data-source-picker"><label className="field-label" htmlFor="notion-data-source"><span>当前 Database 的 data source</span><span className="field-hint">也可以从连接结果切换</span></label><select id="notion-data-source" className="settings-input" value={activeDataSourceId} onChange={(event) => { const source = connection.dataSources.find((item) => item.id === event.target.value); if (!source) return; rememberDataset({ databaseId: connection.databaseId, databaseTitle: connection.databaseTitle, dataSourceId: source.id, dataSourceName: source.name }); setConnection(null) }}>{connection.dataSources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</select></div>}
       {connection && <div className="notion-connection-panel"><div className="notion-connection-heading"><span><Check size={14} />已连接到 {connection.databaseTitle}</span><small>{connection.dataSourceName}</small></div><div className="notion-mapping-grid"><span>标题：{mapping?.titleProperty ?? '未识别'}</span><span>日期：{mapping?.dateProperty ?? '未识别'}</span><span>正文：{mapping?.contentProperty ?? '未配置'}</span><span>标签：{mapping?.tagsProperty ?? '未配置'}</span><span>附件：{mapping?.filesProperty ?? '未配置'}</span></div>{mapping && !mapping.ready && <div className="notion-mapping-error">{mapping.message}</div>}<div className="notion-schema-list">{connection.properties.map((property) => <span key={`${property.id}-${property.name}`}><b>{property.name}</b><small>{property.propertyType}</small></span>)}</div></div>}
       <div className="source-card-footer source-card-footer--notion"><span><RefreshCw size={15} className={busy !== 'idle' ? 'spin' : ''} />{busyLabel}</span><div className="notion-actions"><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleCheckConnection() }}><RefreshCw size={15} />检查连接</button><button type="button" className="secondary-button" disabled={busy !== 'idle' || !isConfigured} onClick={() => { void handlePull() }}><ArrowLeft size={15} />拉取 Notion</button><button type="button" className="primary-button" disabled={busy !== 'idle' || !isConfigured} onClick={() => { void handlePush() }}><Cloud size={15} />推送本地</button></div></div>
     </div>
     <NotionSetupGuide />
-    <div className="info-banner"><Sparkles size={16} /><span><strong>同步规则：</strong>CalendarMark 会自动发现 Database 下的 data source，并按类型映射标题、日期、正文、标签和附件。拉取会把远端页面合并到本地；推送会创建新页面或更新已有页面。若 Notion 缺少可选字段，结果中的警告会说明哪些内容留在本机。</span></div>
+    <div className="info-banner"><Sparkles size={16} /><span><strong>同步规则：</strong>CalendarMark 会发现 Token 已授权的 data source，并按类型映射标题、日期、正文、标签和附件。数据集列表只保存本机的同步目标；拉取会把远端页面合并到本地，推送会创建新页面或更新已有页面。</span></div>
   </>
 }
 
@@ -768,13 +886,13 @@ function formatSyncNotice(message: string, warnings: string[]): string {
 
 function NotionSetupGuide() {
   return <section className="notion-guide" aria-labelledby="notion-guide-title">
-    <div className="notion-guide-header"><div><span className="eyebrow">连接引导</span><h3 id="notion-guide-title">3 步准备好 Notion 信息</h3><p>Token 是连接密钥，Database ID 用来告诉 CalendarMark 要读取哪一个数据库。</p></div><a className="guide-link" href="https://developers.notion.com/guides/get-started/quick-start" target="_blank" rel="noreferrer">官方文档 <ExternalLink size={13} /></a></div>
+    <div className="notion-guide-header"><div><span className="eyebrow">连接引导</span><h3 id="notion-guide-title">3 步准备好 Notion 数据源</h3><p>CalendarMark 会根据 Token 自动发现已授权的数据集，不需要手工填写 ID。</p></div><a className="guide-link" href="https://developers.notion.com/guides/get-started/quick-start" target="_blank" rel="noreferrer">官方文档 <ExternalLink size={13} /></a></div>
     <div className="notion-guide-steps">
       <div className="notion-guide-step"><span className="notion-guide-number">1</span><div><strong>创建 Internal connection</strong><p>打开 Notion Integrations，在 Build 中创建 Internal connection，然后进入 Configuration 复制 Installation access token。</p><a className="guide-link guide-link--inline" href="https://www.notion.so/my-integrations" target="_blank" rel="noreferrer">打开 Notion Integrations <ExternalLink size={12} /></a></div></div>
       <div className="notion-guide-step"><span className="notion-guide-number">2</span><div><strong>把目标数据库分享给连接</strong><p>打开目标数据库右上角的 <b>•••</b>，选择 Add connections，搜索刚创建的连接并确认。没有这一步，API 无法访问数据库。</p></div></div>
-      <div className="notion-guide-step"><span className="notion-guide-number">3</span><div><strong>复制 Database ID</strong><p>将数据库作为整页打开，点击 Share → Copy link。复制 URL 中 workspace 后、<code>?v=</code> 前的 32 位字符串。</p><code className="notion-url-example">https://www.notion.so/workspace/<b>database_id</b>?v=view_id</code></div></div>
+      <div className="notion-guide-step"><span className="notion-guide-number">3</span><div><strong>发现并添加数据集</strong><p>回到 CalendarMark，填写 Token 后点击“发现数据集”，在结果中点击“添加数据集”，再选择当前同步目标。</p><code className="notion-url-example">Token → 发现数据集 → 添加数据集</code></div></div>
     </div>
-    <div className="notion-guide-note"><KeyRound size={14} /><span>不要把 Token 发给别人、放进截图或提交到 Git。CalendarMark 会从 Rust 侧直接请求 Notion API，不经过 CalendarMark 自有服务；一个数据库包含多个 data source 时，可以在连接成功后选择目标 data source。</span></div>
+    <div className="notion-guide-note"><KeyRound size={14} /><span>不要把 Token 发给别人、放进截图或提交到 Git。CalendarMark 会从 Rust 侧直接请求 Notion API，不经过 CalendarMark 自有服务；“添加数据集”只保存本机的同步目标，不会修改或删除 Notion 内容。</span></div>
   </section>
 }
 

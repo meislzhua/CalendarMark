@@ -106,11 +106,11 @@ Android job 会安装 JDK 17、Android SDK platform/build-tools/NDK，并使用 
 
 1. 在 Notion Integrations 创建 Internal connection，并在 Configuration 复制 Installation access token。
 2. 打开目标数据库的 `•••` 菜单，选择 Add connections，将该连接加入数据库。
-3. 将数据库作为整页打开，使用 Share → Copy link，复制 URL 中 workspace 后、`?v=` 前的 32 位字符串作为 Database ID。
+3. 回到 CalendarMark，填入 Token，点击“发现数据集”，在结果中点击“添加数据集”，再选择当前同步目标。不需要手工复制 Database ID。
 
 页面内提供了 [Notion 官方快速开始](https://developers.notion.com/guides/get-started/quick-start)、[授权说明](https://developers.notion.com/guides/get-started/authorization) 和 Integrations 入口。Token 是秘密信息，不应截图、提交到 Git 或发送给他人。CalendarMark 将 Token 保存在当前 WebView 的本机设置中，并由 Rust 侧直接请求 Notion API，不会发送到 CalendarMark 自有服务；正式发布前建议将凭据迁移到系统密钥链，详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-连接成功后，CalendarMark 会调用 Retrieve a database 发现 data source，再读取 data source schema。至少需要一个 `title` 类型属性和一个 `date` 类型属性；`rich_text`、`multi_select`、`files` 类型属性会分别映射正文、标签和附件，名称可以是中文或英文，适配器按属性类型自动识别。数据库包含多个 data source 时，可以在界面中选择目标 data source。
+点击“发现数据集”后，CalendarMark 会通过 Notion Search 列出当前 Token 可访问的 data source，并读取所属数据库名称。点击“添加数据集”会把同步目标保存在本机；可以保存多个数据集并随时切换，移除只会删除本机引用，不会删除 Notion 内容。选定数据集后，CalendarMark 会读取 schema。至少需要一个 `title` 类型属性和一个 `date` 类型属性；`rich_text`、`multi_select`、`files` 类型属性会分别映射正文、标签和附件，名称可以是中文或英文，适配器按属性类型自动识别。
 
 操作说明：
 

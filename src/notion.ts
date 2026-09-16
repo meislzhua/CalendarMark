@@ -12,6 +12,18 @@ export type NotionDataSourceOption = {
   name: string
 }
 
+export type NotionDatasetOption = {
+  databaseId: string
+  databaseTitle: string
+  dataSourceId: string
+  dataSourceName: string
+}
+
+export type NotionDiscoveryResult = {
+  datasets: NotionDatasetOption[]
+  warnings: string[]
+}
+
 export type NotionMappingInfo = {
   ready: boolean
   titleProperty?: string
@@ -118,6 +130,11 @@ export async function checkNotionConnection(
     databaseId,
     dataSourceId: dataSourceId || null,
   })
+}
+
+export async function discoverNotionDatasets(token: string): Promise<NotionDiscoveryResult> {
+  ensureTauriRuntime()
+  return invoke<NotionDiscoveryResult>('notion_discover_datasets', { token })
 }
 
 export async function pullNotionEntries(

@@ -1588,8 +1588,7 @@ input::placeholder {
 
 .source-fields {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 9px 13px;
+  gap: 9px;
   padding: 19px 21px 21px;
 }
 
@@ -1599,19 +1598,180 @@ input::placeholder {
 
 .source-fields .settings-input {
   min-height: 37px;
-  grid-column: span 1;
   padding: 0 11px;
   font-size: 11px;
 }
 
-.source-fields .field-label:nth-of-type(2) {
-  grid-column: 2;
-  grid-row: 1;
+.notion-dataset-manager {
+  display: grid;
+  gap: 10px;
+  margin: 0 21px 17px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--surface-muted);
 }
 
-.source-fields .settings-input:nth-of-type(2) {
-  grid-column: 2;
-  grid-row: 2;
+.notion-dataset-header,
+.notion-discovered-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.notion-dataset-header > div,
+.notion-discovered-heading {
+  display: grid;
+  gap: 3px;
+}
+
+.notion-dataset-header strong,
+.notion-discovered-heading strong {
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.notion-dataset-header span,
+.notion-discovered-heading span {
+  color: var(--ink-faint);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.notion-dataset-header .secondary-button {
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding: 0 9px;
+  font-size: 9px;
+}
+
+.notion-dataset-list,
+.notion-discovered-list {
+  display: grid;
+  gap: 6px;
+}
+
+.notion-dataset-option {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  transition: border-color .18s ease, background .18s ease;
+}
+
+.notion-dataset-option--active {
+  border-color: #a9ccb6;
+  background: var(--green-tint);
+}
+
+.notion-dataset-select {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 0;
+  padding: 9px 10px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.notion-dataset-select:hover {
+  background: transparent;
+}
+
+.notion-dataset-copy,
+.notion-discovered-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.notion-dataset-copy strong,
+.notion-discovered-copy strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notion-dataset-copy small,
+.notion-discovered-copy small {
+  overflow: hidden;
+  color: var(--ink-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notion-dataset-copy code {
+  overflow: hidden;
+  color: var(--ink-faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notion-dataset-current {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 6px;
+  background: var(--green-soft);
+  color: var(--green-deep);
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.notion-dataset-option > .plain-icon-button {
+  align-self: center;
+  margin-right: 5px;
+}
+
+.notion-dataset-empty {
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  padding: 10px;
+  color: var(--ink-faint);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.notion-discovered-panel {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.notion-discovered-heading {
+  align-items: baseline;
+}
+
+.notion-discovered-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-radius: 8px;
+  padding: 8px 9px;
+  background: var(--surface);
+}
+
+.notion-discovered-item .primary-button,
+.notion-discovered-item .secondary-button {
+  min-height: 28px;
+  flex: 0 0 auto;
+  padding: 0 8px;
+  font-size: 9px;
 }
 
 .source-card-footer {
@@ -2363,10 +2523,6 @@ input::placeholder {
     height: 40px;
   }
 
-  .source-fields {
-    grid-template-columns: 1fr;
-  }
-
   .source-selector-grid,
   .notion-guide-steps {
     grid-template-columns: 1fr;
@@ -2380,10 +2536,16 @@ input::placeholder {
     align-self: flex-start;
   }
 
-  .source-fields .field-label:nth-of-type(2),
-  .source-fields .settings-input:nth-of-type(2) {
-    grid-column: auto;
-    grid-row: auto;
+  .notion-dataset-header,
+  .notion-discovered-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .notion-dataset-header .secondary-button,
+  .notion-discovered-item .primary-button,
+  .notion-discovered-item .secondary-button {
+    width: 100%;
   }
 
   .source-card-footer,

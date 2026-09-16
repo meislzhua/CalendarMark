@@ -52,6 +52,13 @@ export type DataSourceDefinition = {
   status: DataSourceStatus
 }
 
+export type NotionDataset = {
+  databaseId: string
+  databaseTitle: string
+  dataSourceId: string
+  dataSourceName: string
+}
+
 export const DATA_SOURCE_DEFINITIONS: DataSourceDefinition[] = [
   {
     id: 'notion',
@@ -90,6 +97,7 @@ export type AppSettings = {
   notionToken: string
   notionDatabaseId: string
   notionDataSourceId: string
+  notionDatasets: NotionDataset[]
 }
 
 export const TAG_COLORS: TagColor[] = [
@@ -115,6 +123,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   notionToken: '',
   notionDatabaseId: '',
   notionDataSourceId: '',
+  notionDatasets: [],
 }
 
 export function createId(prefix: string): string {

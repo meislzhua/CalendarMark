@@ -9,8 +9,8 @@
 - 本地存储、主题切换、快捷标签管理。
 - Windows/macOS 托盘、关闭隐藏、全局快捷键。
 - 可替换数据源选择器（Notion、本地存储、WebDAV/Obsidian 规划位）。
-- Notion 配置界面、Token/Database ID 获取引导和数据映射约定。
-- Notion 真实 API 适配器：连接检查、Database → data source 发现、schema 映射、分页拉取。
+- Notion 配置界面、Token 授权引导、数据集发现/添加/切换和数据映射约定。
+- Notion 真实 API 适配器：搜索可访问 data source、连接检查、schema 映射、分页拉取。
 - 本地记录推送/更新、Notion 页面归档、File Upload 附件上传和同步警告。
 - Windows/macOS/Android GitHub Actions 构建入口。
 

@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use reqwest::{multipart, Client, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 const NOTION_API_BASE: &str = "https://api.notion.com/v1";
@@ -24,6 +24,22 @@ pub struct NotionPropertyInfo {
 pub struct NotionDataSourceOption {
     pub id: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionDatasetOption {
+    pub database_id: String,
+    pub database_title: String,
+    pub data_source_id: String,
+    pub data_source_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionDiscoveryResult {
+    pub datasets: Vec<NotionDatasetOption>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,6 +158,166 @@ struct PropertyDescriptor {
 #[derive(Debug, Clone)]
 struct ConnectedNotion {
     info: NotionConnectionInfo,
+}
+
+#[tauri::command]
+pub async fn notion_discover_datasets(token: String) -> Result<NotionDiscoveryResult, String> {
+    let client = notion_client()?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("请先填写 Notion Integration Token。".to_string());
+    }
+
+    let mut datasets = Vec::new();
+    let mut warnings = Vec::new();
+    let mut database_titles = HashMap::<String, String>::new();
+    let mut seen_datasets = HashSet::new();
+    let mut seen_cursors = HashSet::new();
+    let mut cursor: Option<String> = None;
+    let mut batches = 0usize;
+
+    loop {
+        batches += 1;
+        if batches > 1_000 {
+            warnings.push("Notion 返回了超过 100,000 个数据集，已停止继续分页。".to_string());
+            break;
+        }
+
+        let mut body = Map::new();
+        body.insert("page_size".to_string(), json!(PAGE_SIZE));
+        body.insert(
+            "filter".to_string(),
+            json!({ "property": "object", "value": "data_source" }),
+        );
+        body.insert(
+            "sort".to_string(),
+            json!({ "direction": "descending", "timestamp": "last_edited_time" }),
+        );
+        if let Some(start_cursor) = cursor.as_ref() {
+            body.insert("start_cursor".to_string(), json!(start_cursor));
+        }
+
+        let response = request_json(
+            &client,
+            token,
+            Method::POST,
+            "/search",
+            Some(Value::Object(body)),
+        )
+        .await?;
+
+        let results = response
+            .get("results")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        for result in results {
+            if result.get("object").and_then(Value::as_str) != Some("data_source") {
+                continue;
+            }
+
+            let Some(raw_data_source_id) = result.get("id").and_then(Value::as_str) else {
+                warnings.push("Notion 返回了没有 ID 的数据集，已跳过。".to_string());
+                continue;
+            };
+            let data_source_id = match normalize_uuid(raw_data_source_id, "Notion data source ID") {
+                Ok(value) => value,
+                Err(error) => {
+                    warnings.push(error);
+                    continue;
+                }
+            };
+            let Some(raw_database_id) = parent_database_id(&result) else {
+                warnings.push(format!(
+                    "数据集「{}」没有返回所属 Database，已跳过。",
+                    display_value(result.get("title").or_else(|| result.get("name")))
+                        .unwrap_or_else(|| "未命名数据集".to_string())
+                ));
+                continue;
+            };
+            let database_id = match normalize_uuid(raw_database_id, "Notion Database ID") {
+                Ok(value) => value,
+                Err(error) => {
+                    warnings.push(error);
+                    continue;
+                }
+            };
+            let dataset_key = format!("{database_id}:{data_source_id}");
+            if !seen_datasets.insert(dataset_key) {
+                continue;
+            }
+
+            let data_source_name =
+                display_value(result.get("title").or_else(|| result.get("name")))
+                    .unwrap_or_else(|| "未命名数据集".to_string());
+            let database_title = if let Some(title) = database_titles.get(&database_id) {
+                title.clone()
+            } else {
+                let title = match request_json(
+                    &client,
+                    token,
+                    Method::GET,
+                    &format!("/databases/{database_id}"),
+                    None,
+                )
+                .await
+                {
+                    Ok(database) => display_value(database.get("title"))
+                        .unwrap_or_else(|| "未命名数据库".to_string()),
+                    Err(error) => {
+                        warnings.push(format!(
+                            "无法读取数据集「{data_source_name}」所属数据库：{error}"
+                        ));
+                        "未命名数据库".to_string()
+                    }
+                };
+                database_titles.insert(database_id.clone(), title.clone());
+                title
+            };
+
+            datasets.push(NotionDatasetOption {
+                database_id,
+                database_title,
+                data_source_id,
+                data_source_name,
+            });
+        }
+
+        let has_more = response
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let next_cursor = response
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        if !has_more {
+            break;
+        }
+        let Some(next_cursor) = next_cursor else {
+            warnings.push("Notion 返回了 has_more，但没有提供下一页游标。".to_string());
+            break;
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            warnings.push("Notion 返回了重复的数据集分页游标，已停止继续读取。".to_string());
+            break;
+        }
+        cursor = Some(next_cursor);
+    }
+
+    datasets.sort_by(|left, right| {
+        left.database_title
+            .to_lowercase()
+            .cmp(&right.database_title.to_lowercase())
+            .then_with(|| {
+                left.data_source_name
+                    .to_lowercase()
+                    .cmp(&right.data_source_name.to_lowercase())
+            })
+    });
+
+    Ok(NotionDiscoveryResult { datasets, warnings })
 }
 
 #[tauri::command]
@@ -988,6 +1164,13 @@ fn normalize_uuid(value: &str, label: &str) -> Result<String, String> {
     ))
 }
 
+fn parent_database_id(value: &Value) -> Option<&str> {
+    value
+        .get("parent")
+        .and_then(|parent| parent.get("database_id"))
+        .and_then(Value::as_str)
+}
+
 fn normalize_property_name(value: &str) -> String {
     value
         .chars()
@@ -1093,5 +1276,19 @@ mod tests {
     fn chunks_long_rich_text() {
         let items = rich_text_items(&"a".repeat(4_000));
         assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn reads_database_id_from_data_source_parent() {
+        let value = json!({
+            "parent": {
+                "type": "database_id",
+                "database_id": "0123456789abcdef0123456789abcdef"
+            }
+        });
+        assert_eq!(
+            parent_database_id(&value),
+            Some("0123456789abcdef0123456789abcdef")
+        );
     }
 }

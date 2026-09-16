@@ -20,6 +20,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
+            notion::notion_discover_datasets,
             notion::notion_check_connection,
             notion::notion_pull_entries,
             notion::notion_push_entries,
