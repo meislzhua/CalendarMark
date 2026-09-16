@@ -169,50 +169,30 @@ jobs:
         run: npm ci
       - name: Initialize Android project
         run: npx tauri android init --ci --skip-targets-install
-      - name: Configure release signing
-        shell: python
-        run: |
-          import os, re
-          gradle = "src-tauri/gen/android/app/build.gradle.kts"
-          s = open(gradle, encoding="utf-8").read()
-          if "signingConfigs" not in s:
-              signing = (
-                  "    signingConfigs {\n"
-                  "        create(\"release\") {\n"
-                  "            storeFile = rootProject.file(\"calendarmark-release.keystore\")\n"
-                  "            storePassword = System.getenv(\"CM_KEYSTORE_PASSWORD\")\n"
-                  "            keyAlias = System.getenv(\"CM_KEYSTORE_ALIAS\")\n"
-                  "            keyPassword = System.getenv(\"CM_KEYSTORE_PASSWORD\")\n"
-                  "        }\n"
-                  "    }\n"
-              )
-              if "buildTypes {" in s:
-                  s = s.replace("buildTypes {", signing + "    buildTypes {", 1)
-              else:
-                  s = re.sub(r"android\s*\{", lambda m: m.group(0) + "\n" + signing, s, count=1)
-          release_block = re.search(r"buildTypes\s*\{[\s\S]*?release\s*\{([\s\S]*?)\n\s*\}", s)
-          if release_block and "signingConfig" not in release_block.group(1):
-              s = re.sub(
-                  r"(buildTypes\s*\{[\s\S]*?release\s*\{)",
-                  lambda m: m.group(1) + "\n            signingConfig = signingConfigs.getByName(\"release\")",
-                  s,
-                  count=1,
-              )
-          open(gradle, "w", encoding="utf-8").write(s)
-          if "signingConfigs" not in s or "getByName(\"release\")" not in s:
-              raise SystemExit("failed to inject release signing config")
-          os.replace("calendarmark-release.keystore", "src-tauri/gen/android/calendarmark-release.keystore")
-          print("release signing configured")
       - name: Build Android per-ABI APKs
         shell: bash
         run: |
           set -o pipefail
-          npx tauri android build --ci --apk --split-per-abi --verbose 2>&1 | tee android-build.log
+          KEYSTORE="$GITHUB_WORKSPACE/calendarmark-release.keystore"
+          npx tauri android build --ci --apk --split-per-abi --verbose -- \
+            -Pandroid.injected.signing.store.file="$KEYSTORE" \
+            -Pandroid.injected.signing.store.password="$CM_KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.store.type=jks \
+            -Pandroid.injected.signing.key.alias="$CM_KEYSTORE_ALIAS" \
+            -Pandroid.injected.signing.key.password="$CM_KEYSTORE_PASSWORD" \
+            2>&1 | tee android-build.log
       - name: Build Android universal APK + AAB
         shell: bash
         run: |
           set -o pipefail
-          npx tauri android build --ci --apk --aab --verbose 2>&1 | tee -a android-build.log
+          KEYSTORE="$GITHUB_WORKSPACE/calendarmark-release.keystore"
+          npx tauri android build --ci --apk --aab --verbose -- \
+            -Pandroid.injected.signing.store.file="$KEYSTORE" \
+            -Pandroid.injected.signing.store.password="$CM_KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.store.type=jks \
+            -Pandroid.injected.signing.key.alias="$CM_KEYSTORE_ALIAS" \
+            -Pandroid.injected.signing.key.password="$CM_KEYSTORE_PASSWORD" \
+            2>&1 | tee -a android-build.log
       - name: Collect versioned Android packages
         shell: bash
         run: |
@@ -223,8 +203,9 @@ jobs:
           find "$OUT/apk" -name "*-release*.apk" | while read -r f; do
             base="$(basename "$f")"
             base="${base#app-}"
-            base="${base%-*release.apk}"
+            base="${base%.apk}"
             base="${base%-unsigned}"
+            base="${base%-release}"
             cp "$f" "release-assets/CalendarMark_${VERSION}_${base}.apk"
           done
           find "$OUT/bundle" -name "*-release*.aab" | while read -r f; do
@@ -232,6 +213,10 @@ jobs:
           done
           ls -lh release-assets
           test "$(find release-assets -name '*.apk' | wc -l)" -ge 4
+          if find release-assets -name '*unsigned*'; then
+            echo "::error::APK is unsigned"
+            exit 1
+          fi
           test -f "release-assets/CalendarMark_${VERSION}_universal.apk"
           test -f "release-assets/CalendarMark_${VERSION}.aab"
       - name: Upload Android artifacts
