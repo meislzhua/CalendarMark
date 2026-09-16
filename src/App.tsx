@@ -214,6 +214,8 @@ function App() {
   const [newTagName, setNewTagName] = useState('')
   const [tagManageMode, setTagManageMode] = useState(false)
   const [drawerSlideIn, setDrawerSlideIn] = useState(true)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [tagDatesFor, setTagDatesFor] = useState<Tag | null>(null)
   const [shortcutState, setShortcutState] = useState<'ready' | 'browser' | 'error'>('browser')
   const [notice, setNotice] = useState('')
   const [remoteDataState, setRemoteDataState] = useState<RemoteDataState>(settings.dataSource === 'notion' ? 'needs-config' : 'local')
@@ -383,6 +385,8 @@ function App() {
     setDraft(existing ? { ...existing, tagIds: [...existing.tagIds], attachments: [...existing.attachments] } : createDraft(dateKey))
     setSelectedDate(dateKey)
     setView('calendar')
+    setConfirmingDelete(false)
+    setTagDatesFor(null)
     setDrawerOpen(true)
   }
 
@@ -603,7 +607,7 @@ function App() {
         <div className="sidebar-section-label sidebar-section-label--spaced">快捷入口</div>
         <div className="quick-links">
           {tags.filter((tag) => !tag.retired).slice(0, 4).map((tag) => (
-            <button key={tag.id} className="quick-link" onClick={() => openDate(selectedDate)}>
+            <button key={tag.id} className="quick-link" onClick={() => setTagDatesFor(tagDatesFor?.id === tag.id ? null : tag)} aria-expanded={tagDatesFor?.id === tag.id}>
               <span className={`tag-dot tag-dot--${tag.color}`} />
               <span>{tag.name}</span>
               <span className="quick-link-count">{entries.filter((entry) => entry.tagIds.includes(tag.id)).length}</span>
@@ -613,6 +617,22 @@ function App() {
             <Plus size={15} />
             <span>管理标签</span>
           </button>
+          {tagDatesFor && (
+            <div className="tag-dates-popover">
+              <div className="tag-dates-heading"><span className={`tag-dot tag-dot--${tagDatesFor.color}`} /><strong>{tagDatesFor.name}</strong><button type="button" className="plain-icon-button" aria-label="关闭" onClick={() => setTagDatesFor(null)}><X size={13} /></button></div>
+              {(() => {
+                const dates = Array.from(new Set(entries.filter((entry) => entry.tagIds.includes(tagDatesFor.id)).map((entry) => entry.date))).sort().reverse()
+                if (dates.length === 0) return <div className="tag-dates-empty">还没有带这个标签的记录</div>
+                return <div className="tag-dates-list">{dates.slice(0, 8).map((date) => {
+                  const entry = entries.find((item) => item.date === date && item.tagIds.includes(tagDatesFor.id))
+                  return <button key={date} type="button" className="tag-date-item" onClick={() => openDate(date)}>
+                    <span className="tag-date-day">{formatDateKey(date, { month: 'short', day: 'numeric' })}</span>
+                    <span className="tag-date-title">{entry?.title || '未命名记录'}</span>
+                  </button>
+                })}{dates.length > 8 && <div className="tag-dates-empty">还有 {dates.length - 8} 天，可在日历中查看</div>}</div>
+              })()}
+            </div>
+          )}
         </div>
 
         <div className="sidebar-footer">
@@ -743,7 +763,13 @@ function App() {
               <label className="upload-zone"><Upload size={18} /><span><strong>拖拽或选择文件</strong><small>支持图片、TXT、Markdown、PDF</small></span><input type="file" multiple accept="image/*,.txt,.md,.pdf" onChange={handleFiles} /></label>
               {draft.attachments.length > 0 && <div className="attachment-list">{draft.attachments.map((attachment) => <AttachmentItem key={attachment.id} attachment={attachment} onRemove={() => setDraft((previous) => ({ ...previous, attachments: previous.attachments.filter((item) => item.id !== attachment.id) }))} />)}</div>}
             </div>
-            <div className="drawer-footer">{entries.some((entry) => entry.id === draft.id) && <button type="button" className="danger-button" disabled={remoteDataState === 'deleting'} onClick={() => { void handleDeleteEntry() }}><Trash2 size={15} />删除</button>}<div className="drawer-footer-actions"><button type="button" className="secondary-button" onClick={() => setDrawerOpen(false)}>取消</button><button type="submit" className="primary-button" disabled={remoteDataState === 'saving'}><Save size={15} />{settings.dataSource === 'notion' ? '保存到 Notion' : '保存记录'}</button></div></div>
+            <div className="drawer-footer">{entries.some((entry) => entry.id === draft.id) && (confirmingDelete
+              ? <div className="delete-confirm">
+                <span>删除这条记录？</span>
+                <button type="button" className="danger-button" disabled={remoteDataState === 'deleting'} onClick={() => { void handleDeleteEntry() }}>确认删除</button>
+                <button type="button" className="text-button" onClick={() => setConfirmingDelete(false)}>取消</button>
+              </div>
+              : <button type="button" className="danger-button" onClick={() => setConfirmingDelete(true)}><Trash2 size={15} />删除</button>)}<div className="drawer-footer-actions"><button type="button" className="secondary-button" onClick={() => setDrawerOpen(false)}>取消</button><button type="submit" className="primary-button" disabled={remoteDataState === 'saving'}><Save size={15} />{settings.dataSource === 'notion' ? '保存到 Notion' : '保存记录'}</button></div></div>
           </form>
         </aside>
       </>}
