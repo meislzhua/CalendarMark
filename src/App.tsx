@@ -646,6 +646,18 @@ function App() {
                 <button className="plain-icon-button" aria-label="下个月" onClick={() => moveMonth(1)}><ChevronRight size={18} /></button>
               </div>
               <div className="calendar-toolbar-actions">
+                {settings.dataSource === 'notion' && (
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label="刷新远程数据"
+                    title="重新读取 Notion 数据"
+                    disabled={remoteDataState === 'loading'}
+                    onClick={() => setRemoteReloadToken((token) => token + 1)}
+                  >
+                    <RefreshCw size={17} className={remoteDataState === 'loading' ? 'spin' : ''} />
+                  </button>
+                )}
                 <button className="text-button" onClick={() => setCurrentMonth(new Date(new Date().getFullYear(), new Date().getMonth(), 1))}><ArrowLeft size={15} />回到今天</button>
                 <button className="primary-button" onClick={() => openDate(today)}><Plus size={16} />记录今天</button>
               </div>
