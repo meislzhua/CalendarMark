@@ -119,7 +119,7 @@ export const DEFAULT_TAGS: Tag[] = [
 export const DEFAULT_SETTINGS: AppSettings = {
   shortcut: 'CommandOrControl+Shift+Space',
   theme: 'light',
-  dataSource: 'notion',
+  dataSource: 'local',
   notionToken: '',
   notionDatabaseId: '',
   notionDataSourceId: '',

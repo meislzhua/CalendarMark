@@ -66,8 +66,8 @@ CalendarMark
 
 数据源设置不把 Notion 写死为唯一选项，而是使用可替换的数据源选择器。当前提供：
 
-- **Notion**：首个已实现的外部数据源，支持数据集发现、添加/移除本机同步目标、数据集选择、连接检查、拉取、推送、页面归档和附件上传。
-- **本地存储**：当前可用，适合离线记录。
+- **Notion**：首个已实现的外部数据源，选中即远程直连——读取、保存、删除直接作用于当前数据集；支持数据集发现、添加/移除本机同步目标、数据集切换、连接检查、手动重新读取、页面归档和附件上传。
+- **本地存储**：当前可用，适合离线记录；可在设置中对已配置的 Notion 数据集执行“拉取到本地 / 推送到 Notion”。
 - **WebDAV / Obsidian Vault**：展示为规划中的数据源，暂不允许连接。
 
 选择 Notion 后，页面内提供三步连接引导：创建 Internal connection 并复制 token、将目标数据库通过 Add connections 分享给连接、回到 CalendarMark 发现并添加数据集。Token 不应被截图或提交到版本库。
@@ -84,7 +84,9 @@ CalendarMark
 | `tagIds` | Tags | multi_select |
 | `attachments` | Attachments | files / URL |
 
-CalendarMark 不在前端直连 Notion，而是通过 Tauri IPC 将操作交给 Rust 适配器，避免把请求逻辑和令牌放进浏览器网络层。发现数据集时按 Token 搜索可访问的 data source，选定后读取 schema，再按属性类型建立映射；至少需要一个 `title` 和一个 `date` 属性。同步由用户显式点击“拉取 Notion”或“推送本地”触发。
+CalendarMark 不在网页层直连 Notion，而是通过 Tauri IPC 将操作交给 Rust 适配器，避免把请求逻辑和令牌放进浏览器网络层。发现数据集时按 Token 搜索可访问的 data source，选定后读取 schema，再按属性类型建立映射；至少需要一个 `title` 和一个 `date` 属性。
+
+数据源语义分为两种：选择 Notion 时为远程直连，应用启动、切换数据集或点击“重新读取”时查询远端页面，日历展示当前 Notion 数据，保存和删除直接写入远端，不落盘到本机 entries/tags 存储；选择本地存储时以本机记录为主，用户可在设置中显式点击“拉取到本地”或“推送到 Notion”。
 
 推送规则：没有 `remote` 引用的本地记录创建 Notion 页面，已有引用的记录更新对应页面；本地附件通过 Notion File Upload API 上传到 `files` 属性。删除带远端引用的本地记录时，CalendarMark 会先将 Notion 页面移入回收站。
 
@@ -104,6 +106,6 @@ CalendarMark 不在前端直连 Notion，而是通过 Tauri IPC 将操作交给 
 - [x] 图片和文档附件加入草稿。
 - [x] 右侧抽屉带打开/关闭动画。
 - [x] 设置页包含可替换数据源选择器、Notion 引导、快捷键、界面、标签管理。
-- [x] Notion 真实连接、schema 映射、分页拉取、页面创建/更新、归档和附件上传。
+- [x] Notion 真实连接、schema 映射、分页读取、远程直连读写、本地模式拉取/推送、归档和附件上传。
 - [x] Tauri 托盘、关闭隐藏、桌面快捷键桥接。
 - [x] GitHub Actions 覆盖 Windows、macOS、Android 构建入口。

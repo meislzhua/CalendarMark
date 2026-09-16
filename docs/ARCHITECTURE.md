@@ -48,11 +48,11 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 
 ### `src/notion.ts`
 
-只负责 Tauri IPC 的类型和调用封装：发现数据集、检查连接、拉取页面、推送记录和归档页面。浏览器预览不会直接访问 Notion；点击同步按钮时会提示需要使用 Tauri 桌面版或 Android 版。
+只负责 Tauri IPC 的类型和调用封装：发现数据集、检查连接、读取页面、写入页面和归档页面。远程直连模式由 App 在启动/切换数据集时调用读取命令；本地模式的设置面板才显示显式拉取/推送按钮。浏览器预览不会直接访问 Notion。
 
 ### `src/App.tsx`
 
-当前 MVP 使用单一页面状态管理，`view` 区分日历/设置，`drawerOpen` 控制记录抽屉；以后可以按需要拆成 `CalendarPage`、`EntryDrawer`、`SettingsPage`，但目前集中实现有利于快速验证产品流程。
+当前 MVP 使用单一页面状态管理，`view` 区分日历/设置，`drawerOpen` 控制记录抽屉。`dataSource=notion` 时，页面启动、切换数据集或点击“重新读取”会自动查询远端（查询前有 500ms 防抖，合并 Token 输入等连续变化），编辑保存和删除直接调用 Notion；`dataSource=local` 时加载/保存 `localStorage`，并在本地数据源配置中提供显式远程同步。
 
 ## 3. Rust/Tauri 模块
 
@@ -73,7 +73,7 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 - `Retrieve a database`：根据选中的 Database ID 发现所有 `data_sources`，兼容旧配置并允许用户切换目标 data source。
 - `Retrieve a data source`：读取 schema，并按属性类型自动识别 title、date、rich_text、multi_select、files。
 - `POST /data_sources/{id}/query`：分页拉取页面，处理游标重复和异常分页响应。
-- `POST /pages` / `PATCH /pages/{id}`：创建或更新本地记录对应的页面。
+- `POST /pages` / `PATCH /pages/{id}`：创建或更新日历记录对应的页面；远程直连模式在单条记录保存时调用，本地模式由显式推送调用。
 - `POST /file_uploads` + multipart send：上传本地 Data URL 附件并将 file upload ID 写入 files 属性。
 - `PATCH /pages/{id}` with `in_trash=true`：删除本地远端关联记录时归档页面。
 - 对 429 和 5xx 做最多三次短退避重试，错误消息只返回 Notion 的状态和 message，不输出 Token。
@@ -108,7 +108,7 @@ type Attachment = {
 }
 ```
 
-日期使用本地 `YYYY-MM-DD`，不直接序列化 `Date`，避免跨时区同步时出现前后一天的问题。
+日期使用本地 `YYYY-MM-DD`，不直接序列化 `Date`，避免跨时区同步时出现前后一天的问题。远程直连模式的 `entries` 和 `tags` 只作为当前窗口的运行时状态，不由 `saveEntries` / `saveTags` 持久化到本机；本地模式才使用这两个 localStorage 键。
 
 ## 5. 可替换数据源和 Notion 边界
 
@@ -124,23 +124,27 @@ DataSourceDefinition[]
 
 `AppSettings.dataSource` 只保存当前选择，Notion 专属字段保存 `notionToken`、当前选中的 `notionDatabaseId` / `notionDataSourceId`，以及可切换的 `notionDatasets` 本地列表。Database/Data source ID 仍作为同步适配器的内部引用和旧配置兼容字段，但设置界面不再要求用户手工填写。
 
-Notion 同步路径如下：
+数据源运行语义如下：
 
 ```text
 Integration Token
+   │
+   ▼
+Notion 远程直连
     │
-    ▼
-Search data_sources ── add to local list ── select dataset
-    │                                          │
-    ▼                                          ▼
-Retrieve database / schema ── property mapping ── query pages
-    │                                          │
-    └─────────────── connection result ────────┘
-                         │
-             pull merge / push create-or-update
+    ├─ 启动/切换数据集 ── query pages ── 内存中的日历
+    ├─ 重新读取 ──────── query pages ── 刷新内存数据
+    ├─ 保存记录 ──────── create/update page
+    └─ 删除记录 ──────── archive page
+
+本地数据源
+    │
+    ├─ 启动/切换 ─────── localStorage
+    ├─ 拉取到本地 ────── Notion query → 合并本地记录
+    └─ 推送到 Notion ─── local records → create/update pages
 ```
 
-当前同步是用户主动触发的“拉取 / 推送”模型，不会后台自动覆盖本地记录。远端页面 ID 保存在 `CalendarEntry.remote`，推送时据此决定创建还是更新；拉取时按该引用更新已有条目，不会删除本地未出现在远端结果中的条目。
+远端页面 ID 保存在 `CalendarEntry.remote`，写入时据此决定创建还是更新；本地模式的拉取采用合并策略，不会删除本地未出现在远端结果中的条目。当前不会后台持续监听 Notion 的外部修改，外部改动需要点击“重新读取”刷新，也不提供自动冲突解决。
 
 ## 6. 权限和安全
 
@@ -149,7 +153,7 @@ Retrieve database / schema ── property mapping ── query pages
 - CSP 当前为 `null` 以支持 Vite/Tauri MVP；Notion 请求已经放入 Rust，生产发布仍应收紧 WebView CSP。
 - 当前 Token 随 `AppSettings` 保存在 WebView localStorage，方便 MVP 使用但不是系统级密钥链；正式发布前应迁移到 Tauri Store 的安全后端或系统 Keychain。
 - Notion Token 不发送给 CalendarMark 服务。拉取的文件 URL 是 Notion 返回的临时 URL；本地附件先作为 Data URL 保存并在推送时通过 File Upload API 上传，后续应把附件迁移到应用数据目录。
-- 当前没有自动冲突解决、后台队列或离线重试；双端同时编辑时以用户最后一次显式拉取/推送为准。
+- 当前没有自动冲突解决、后台队列或离线重试；远程直连模式下双端同时编辑以最后一次写入为准，本地模式下以用户最后一次显式拉取/推送为准。
 
 ## 7. 跨平台策略
 
