@@ -95,8 +95,10 @@ jobs:
         run: npm ci
       - name: Initialize Android project
         run: npx tauri android init --ci --skip-targets-install
-      - name: Build Android packages
-        run: npx tauri android build --ci --apk --aab --split-per-abi
+      - name: Build Android APKs
+        run: npx tauri android build --ci --apk --split-per-abi
+      - name: Build Android AAB
+        run: npx tauri android build --ci --aab
       - name: Upload Android packages
         uses: actions/upload-artifact@v4
         with:

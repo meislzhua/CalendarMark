@@ -59,7 +59,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 ```text
 checkout → Node 22 → Rust stable → npm ci
 Windows/macOS → tauri-action → Workflow Artifact
-Android → JDK 17 → Android SDK/NDK → tauri android init --ci → APK/AAB Artifact
+Android → JDK 17 → Android SDK/NDK → tauri android init --ci → split APK → universal AAB → Artifact
 ```
 
 当前只上传未签名构建产物。要做正式发布，至少需要：
