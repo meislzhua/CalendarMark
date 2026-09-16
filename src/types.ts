@@ -36,9 +36,13 @@ export type CalendarEntry = {
   content: string
   tagIds: string[]
   attachments: Attachment[]
+  /** 可选心情 emoji，随记录保存并显示在日历格上 */
+  mood?: string
   updatedAt: string
   remote?: EntryRemoteRef
 }
+
+export const MOOD_OPTIONS = ['😀', '😊', '😌', '🤩', '😎', '🤔', '😕', '😢', '😤', '😩', '😴', '🤒'] as const
 
 export type ThemeMode = 'light' | 'dark' | 'auto'
 

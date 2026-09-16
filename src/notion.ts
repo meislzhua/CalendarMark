@@ -73,6 +73,7 @@ export type NotionEntryRecord = {
   title: string
   content: string
   tagNames: string[]
+  mood?: string
   attachments: NotionAttachmentRecord[]
   updatedAt: string
   url?: string
@@ -105,7 +106,14 @@ export type NotionEntryInput = {
   title: string
   content: string
   tagNames: string[]
+  mood?: string
   attachments: NotionAttachmentInput[]
+}
+
+export type NotionPullQuery = {
+  dateStart?: string
+  dateEnd?: string
+  tag?: string
 }
 
 export type NotionPushRecord = {
@@ -152,12 +160,14 @@ export async function pullNotionEntries(
   token: string,
   databaseId: string,
   dataSourceId?: string,
+  query?: NotionPullQuery,
 ): Promise<NotionPullResult> {
   ensureTauriRuntime()
   return invoke<NotionPullResult>('notion_pull_entries', {
     token,
     databaseId,
     dataSourceId: dataSourceId || null,
+    query: query ?? null,
   })
 }
 
