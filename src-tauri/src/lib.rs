@@ -5,6 +5,8 @@ use tauri::{
     Emitter, Manager, WindowEvent,
 };
 
+mod notion;
+
 #[cfg(desktop)]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -17,6 +19,12 @@ fn show_main_window(app: &tauri::AppHandle) {
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::default().build())
+        .invoke_handler(tauri::generate_handler![
+            notion::notion_check_connection,
+            notion::notion_pull_entries,
+            notion::notion_push_entries,
+            notion::notion_archive_page
+        ])
         .setup(|_app| {
             #[cfg(desktop)]
             {

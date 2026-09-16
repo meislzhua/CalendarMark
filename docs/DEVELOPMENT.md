@@ -38,14 +38,22 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 ## 4. Notion 开发约定
 
-当前设置页提供可替换数据源选择器；Notion 面板会引导用户创建 Internal connection、分享目标数据库并提取 Database ID，但仍只保存配置，不请求 Notion。真实接入时请遵循：
+Notion 已由 `src-tauri/src/notion.rs` 通过 Rust HTTP client 接入，React 只通过 `src/notion.ts` 发起 IPC 调用。设置页会引导用户创建 Internal connection、分享目标数据库并提取 Database ID。
 
 - 不在 React 前端直接调用 Notion API。
-- 不把 Integration Token 写入日志、错误 toast 或 GitHub Actions 输出。
-- 将 Token 放入 Tauri Store 的安全后端或系统 Keychain。
-- 使用 Database ID 先调用 Retrieve a database，发现对应的 data source ID，再读取 data source schema。
-- 为数据库字段建立可配置映射，不假设用户数据库属性名称一定是英文。
-- 使用分页和重试；同步结果可解释，冲突需要用户可见。
+- 不把 Integration Token 写入日志、错误 toast 或 GitHub Actions 输出；请求错误只返回 HTTP 状态和 Notion message。
+- 当前 Token 为了 MVP 体验保存在 WebView localStorage，正式发布前应迁移到 Tauri Store 的安全后端或系统 Keychain。
+- 使用 Database ID 先调用 Retrieve a database，发现 data source ID，再读取 data source schema；数据库包含多个 data source 时由用户选择。
+- 字段映射按属性类型优先、按中文/英文名称辅助识别：`title` + `date` 为必需，`rich_text` / `multi_select` / `files` 为可选。
+- 查询使用 cursor 分页；429 和 5xx 最多做三次短退避重试。
+- 推送时根据本地 `remote.id` 选择创建或更新页面；附件先创建 File Upload，再通过 multipart 上传并写入 `files` 属性。
+- 同步是显式拉取/推送，不做后台自动覆盖；冲突和可选字段缺失通过同步警告反馈给用户。
+
+本地可以使用单元测试验证字段映射和 ID 规范化：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+```
 
 官方参考：[快速开始](https://developers.notion.com/guides/get-started/quick-start)、[授权与页面分享](https://developers.notion.com/guides/get-started/authorization)、[数据库与 data source](https://developers.notion.com/guides/data-apis/working-with-databases)。
 

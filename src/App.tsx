@@ -70,6 +70,17 @@ import {
   registerGlobalShortcut,
   showMainWindow,
 } from './tauri'
+import {
+  archiveNotionPage,
+  checkNotionConnection,
+  pullNotionEntries,
+  pushNotionEntries,
+} from './notion'
+import type {
+  NotionConnectionInfo,
+  NotionEntryRecord,
+  NotionPushResult,
+} from './notion'
 
 type View = 'calendar' | 'settings'
 type SettingsSection = 'source' | 'shortcut' | 'interface' | 'tags'
@@ -227,8 +238,22 @@ function App() {
     setNotice('日期内容已保存')
   }
 
-  function handleDeleteEntry() {
-    if (!entries.some((entry) => entry.id === draft.id)) return
+  async function handleDeleteEntry() {
+    const existing = entries.find((entry) => entry.id === draft.id)
+    if (!existing) return
+    if (existing.remote?.provider === 'notion') {
+      if (!settings.notionToken.trim() || !settings.notionDatabaseId.trim()) {
+        setNotice('删除 Notion 记录前，请先补全连接配置')
+        return
+      }
+      try {
+        setNotice('正在从 Notion 归档记录…')
+        await archiveNotionPage(settings.notionToken, existing.remote.id)
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error))
+        return
+      }
+    }
     setEntries((previous) => previous.filter((entry) => entry.id !== draft.id))
     setDrawerOpen(false)
     setNotice('日期内容已删除')
@@ -357,7 +382,7 @@ function App() {
             <span>本地草稿</span>
             <span className="data-source-divider">·</span>
             <span className="notion-wordmark">N</span>
-            <span>Notion 待连接</span>
+            <span>Notion {settings.notionToken.trim() && settings.notionDatabaseId.trim() ? '已配置' : '待连接'}</span>
           </div>
         </div>
       </aside>
@@ -435,7 +460,7 @@ function App() {
             </section>
           </>
         ) : (
-          <SettingsView settings={settings} settingsSection={settingsSection} setSettingsSection={setSettingsSection} onChangeSettings={setSettings} tags={tags} onAddTag={(name) => addTag(name)} onDeleteTag={deleteTag} shortcutState={shortcutState} onNotice={setNotice} />
+          <SettingsView settings={settings} settingsSection={settingsSection} setSettingsSection={setSettingsSection} onChangeSettings={setSettings} entries={entries} onChangeEntries={setEntries} tags={tags} onChangeTags={setTags} onAddTag={(name) => addTag(name)} onDeleteTag={deleteTag} shortcutState={shortcutState} onNotice={setNotice} />
         )}
       </main>
 
@@ -456,7 +481,7 @@ function App() {
               <label className="upload-zone"><Upload size={18} /><span><strong>拖拽或选择文件</strong><small>支持图片、TXT、Markdown、PDF</small></span><input type="file" multiple accept="image/*,.txt,.md,.pdf" onChange={handleFiles} /></label>
               {draft.attachments.length > 0 && <div className="attachment-list">{draft.attachments.map((attachment) => <AttachmentItem key={attachment.id} attachment={attachment} onRemove={() => setDraft((previous) => ({ ...previous, attachments: previous.attachments.filter((item) => item.id !== attachment.id) }))} />)}</div>}
             </div>
-            <div className="drawer-footer">{entries.some((entry) => entry.id === draft.id) && <button type="button" className="danger-button" onClick={handleDeleteEntry}><Trash2 size={15} />删除</button>}<div className="drawer-footer-actions"><button type="button" className="secondary-button" onClick={() => setDrawerOpen(false)}>取消</button><button type="submit" className="primary-button"><Save size={15} />保存记录</button></div></div>
+            <div className="drawer-footer">{entries.some((entry) => entry.id === draft.id) && <button type="button" className="danger-button" onClick={() => { void handleDeleteEntry() }}><Trash2 size={15} />删除</button>}<div className="drawer-footer-actions"><button type="button" className="secondary-button" onClick={() => setDrawerOpen(false)}>取消</button><button type="submit" className="primary-button"><Save size={15} />保存记录</button></div></div>
           </form>
         </aside>
       </>}
@@ -468,7 +493,8 @@ function App() {
 
 function AttachmentItem({ attachment, onRemove }: { attachment: Attachment; onRemove: () => void }) {
   const isImage = attachment.mimeType.startsWith('image/')
-  return <div className="attachment-item">{isImage ? <img src={attachment.dataUrl} alt={attachment.name} /> : <div className="attachment-file-icon"><FileText size={17} /></div>}<div className="attachment-copy"><strong title={attachment.name}>{attachment.name}</strong><small>{formatBytes(attachment.size)}</small></div><button type="button" className="plain-icon-button" aria-label={`移除 ${attachment.name}`} onClick={onRemove}><X size={14} /></button></div>
+  const previewUrl = attachment.dataUrl || attachment.sourceUrl
+  return <div className="attachment-item">{isImage && previewUrl ? <img src={previewUrl} alt={attachment.name} /> : <div className="attachment-file-icon"><FileText size={17} /></div>}<div className="attachment-copy"><strong title={attachment.name}>{attachment.name}</strong><small>{attachment.size > 0 ? formatBytes(attachment.size) : 'Notion 远程附件'}</small></div><button type="button" className="plain-icon-button" aria-label={`移除 ${attachment.name}`} onClick={onRemove}><X size={14} /></button></div>
 }
 
 type SettingsViewProps = {
@@ -476,14 +502,17 @@ type SettingsViewProps = {
   settingsSection: SettingsSection
   setSettingsSection: (section: SettingsSection) => void
   onChangeSettings: (settings: AppSettings) => void
+  entries: CalendarEntry[]
+  onChangeEntries: (entries: CalendarEntry[]) => void
   tags: Tag[]
+  onChangeTags: (tags: Tag[]) => void
   onAddTag: (name: string) => void
   onDeleteTag: (tagId: string) => void
   shortcutState: 'ready' | 'browser' | 'error'
   onNotice: (message: string) => void
 }
 
-function SettingsView({ settings, settingsSection, setSettingsSection, onChangeSettings, tags, onAddTag, onDeleteTag, shortcutState, onNotice }: SettingsViewProps) {
+function SettingsView({ settings, settingsSection, setSettingsSection, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onAddTag, onDeleteTag, shortcutState, onNotice }: SettingsViewProps) {
   const [newTag, setNewTag] = useState('')
   const sections: { id: SettingsSection; label: string; description: string; icon: typeof Database }[] = [
     { id: 'source', label: '数据源', description: '选择数据来源', icon: Database },
@@ -508,7 +537,7 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
         <div className="settings-nav-note"><CircleHelp size={15} /><span>数据源可以替换；外部连接凭据只保存在本机，不会上传到 CalendarMark 服务。</span></div>
       </nav>
       <section className="settings-content">
-        {settingsSection === 'source' && <DataSourceSettings settings={settings} onChangeSettings={onChangeSettings} onNotice={onNotice} />}
+        {settingsSection === 'source' && <DataSourceSettings settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} />}
         {settingsSection === 'shortcut' && <><SettingsTitle icon={<Keyboard size={18} />} eyebrow="快捷键" title="不用打断思路，就能打开记录窗口" description="桌面版会在启动时注册全局快捷键；浏览器预览不会抢占系统快捷键。" /><div className="preference-card"><div className="preference-row"><div className="preference-copy"><strong>打开 CalendarMark</strong><span>建议使用不容易和其他软件冲突的组合键</span></div><div className="shortcut-input-wrap"><Command size={15} /><input aria-label="全局快捷键" value={settings.shortcut} onChange={(event) => update({ shortcut: event.target.value })} /></div></div><div className="preference-row preference-row--subtle"><span className="connection-badge connection-badge--plain"><span className={`status-dot ${shortcutState === 'error' ? 'status-dot--error' : ''}`} />{shortcutState === 'ready' ? '桌面快捷键已注册' : shortcutState === 'error' ? '快捷键注册失败，请更换组合' : '浏览器预览模式'}</span><button className="text-button" onClick={() => update({ shortcut: DEFAULT_SETTINGS.shortcut })}>恢复默认</button></div></div><div className="shortcut-preview"><div className="shortcut-preview-icon"><Zap size={18} /></div><div><strong>快速记录的节奏</strong><p>按下快捷键后，CalendarMark 会显示主窗口；再点击某一天即可打开右侧记录抽屉。</p></div><kbd>{settings.shortcut.replace('CommandOrControl', 'Ctrl')}</kbd></div></>}
         {settingsSection === 'interface' && <><SettingsTitle icon={<Palette size={18} />} eyebrow="界面" title="选择让你感觉舒服的明暗" description="主题设置会立即应用到 CalendarMark 的所有界面。" /><div className="theme-options"><ThemeOption icon={<Sun size={18} />} title="浅色" description="干净明亮的纸张感" active={settings.theme === 'light'} onClick={() => update({ theme: 'light' })} /><ThemeOption icon={<Moon size={18} />} title="深色" description="夜间记录更舒适" active={settings.theme === 'dark'} onClick={() => update({ theme: 'dark' })} /><ThemeOption icon={<Monitor size={18} />} title="跟随系统" description="随系统自动切换" active={settings.theme === 'auto'} onClick={() => update({ theme: 'auto' })} /></div><div className="preference-card"><div className="preference-row"><div className="preference-copy"><strong>启动时显示上次浏览的月份</strong><span>下次打开时保留你的浏览上下文</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div><div className="preference-row"><div className="preference-copy"><strong>关闭窗口时保留在托盘</strong><span>点击右上角关闭只隐藏窗口，不退出应用</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div></div></>}
         {settingsSection === 'tags' && <><SettingsTitle icon={<TagIcon size={18} />} eyebrow="标签管理" title="让标签替你整理生活的纹理" description="快捷标签会显示在日历格子和记录抽屉里。" /><div className="tag-manager-card"><div className="tag-manager-header"><div><strong>我的标签</strong><span>{tags.length} 个标签</span></div><form className="tag-add-form" onSubmit={submitTag}><input aria-label="标签名称" placeholder="输入新标签" value={newTag} onChange={(event) => setNewTag(event.target.value)} /><button type="submit" aria-label="添加标签"><Plus size={16} /></button></form></div><div className="managed-tags">{tags.map((tag) => <div className="managed-tag" key={tag.id}><span className={`tag-dot tag-dot--${tag.color}`} /><span>{tag.name}</span><span className="managed-tag-count">快捷标签</span><button className="plain-icon-button" aria-label={`删除 ${tag.name}`} onClick={() => onDeleteTag(tag.id)}><Trash2 size={14} /></button></div>)}</div></div><div className="info-banner info-banner--warm"><Hash size={16} /><span>小建议：保持标签在 3–8 个之间，日历会更清晰，也更容易回顾。</span></div></>}
@@ -517,7 +546,7 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
   </div>
 }
 
-function DataSourceSettings({ settings, onChangeSettings, onNotice }: { settings: AppSettings; onChangeSettings: (settings: AppSettings) => void; onNotice: (message: string) => void }) {
+function DataSourceSettings({ settings, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onNotice }: { settings: AppSettings; onChangeSettings: (settings: AppSettings) => void; entries: CalendarEntry[]; onChangeEntries: (entries: CalendarEntry[]) => void; tags: Tag[]; onChangeTags: (tags: Tag[]) => void; onNotice: (message: string) => void }) {
   const selectedSource = DATA_SOURCE_DEFINITIONS.find((source) => source.id === settings.dataSource) ?? DATA_SOURCE_DEFINITIONS[0]
   const update = (partial: Partial<AppSettings>) => onChangeSettings({ ...settings, ...partial })
 
@@ -528,7 +557,7 @@ function DataSourceSettings({ settings, onChangeSettings, onNotice }: { settings
   }
 
   return <>
-    <SettingsTitle icon={<Database size={18} />} eyebrow="数据源" title="选择可以替换的数据来源" description="CalendarMark 用统一的数据源入口承载不同连接方式；当前先把 Notion 适配器和本地存储整理好，后续可以继续加入更多 provider。" />
+    <SettingsTitle icon={<Database size={18} />} eyebrow="数据源" title="选择可以替换的数据来源" description="CalendarMark 用统一的数据源入口承载不同连接方式；Notion 已支持连接、拉取、推送和页面归档。" />
     <div className="source-selector-grid" aria-label="数据源选择">
       {DATA_SOURCE_DEFINITIONS.map((source) => {
         const isActive = selectedSource.id === source.id
@@ -546,7 +575,7 @@ function DataSourceSettings({ settings, onChangeSettings, onNotice }: { settings
         </button>
       })}
     </div>
-    {selectedSource.id === 'notion' && <NotionSourceSettings settings={settings} onChangeSettings={onChangeSettings} onNotice={onNotice} />}
+    {selectedSource.id === 'notion' && <NotionSourceSettings settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} />}
     {selectedSource.id === 'local' && <LocalSourceSettings onSelectNotion={() => update({ dataSource: 'notion' })} />}
     {selectedSource.status === 'planned' && <PlannedSourceSettings sourceId={selectedSource.id} />}
   </>
@@ -559,25 +588,182 @@ function DataSourceIcon({ id }: { id: DataSourceId }) {
   return <Database size={17} />
 }
 
-function NotionSourceSettings({ settings, onChangeSettings, onNotice }: { settings: AppSettings; onChangeSettings: (settings: AppSettings) => void; onNotice: (message: string) => void }) {
+type NotionBusyState = 'idle' | 'checking' | 'pulling' | 'pushing'
+
+type NotionSourceSettingsProps = {
+  settings: AppSettings
+  onChangeSettings: (settings: AppSettings) => void
+  entries: CalendarEntry[]
+  onChangeEntries: (entries: CalendarEntry[]) => void
+  tags: Tag[]
+  onChangeTags: (tags: Tag[]) => void
+  onNotice: (message: string) => void
+}
+
+function NotionSourceSettings({ settings, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onNotice }: NotionSourceSettingsProps) {
+  const [connection, setConnection] = useState<NotionConnectionInfo | null>(null)
+  const [busy, setBusy] = useState<NotionBusyState>('idle')
   const isConfigured = Boolean(settings.notionToken.trim() && settings.notionDatabaseId.trim())
   const update = (partial: Partial<AppSettings>) => onChangeSettings({ ...settings, ...partial })
 
+  async function handleCheckConnection() {
+    if (!isConfigured) {
+      onNotice('请先填写 Token 和 Database ID')
+      return
+    }
+    setBusy('checking')
+    try {
+      const result = await checkNotionConnection(settings.notionToken, settings.notionDatabaseId, settings.notionDataSourceId)
+      setConnection(result)
+      if (result.dataSourceId !== settings.notionDataSourceId) update({ notionDataSourceId: result.dataSourceId })
+      onNotice(`Notion 已连接：${result.dataSourceName}`)
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function handlePull() {
+    if (!isConfigured) {
+      onNotice('请先填写 Token 和 Database ID')
+      return
+    }
+    setBusy('pulling')
+    try {
+      const result = await pullNotionEntries(settings.notionToken, settings.notionDatabaseId, settings.notionDataSourceId)
+      const merged = mergeNotionEntries(result.entries, entries, tags)
+      onChangeTags(merged.tags)
+      onChangeEntries(merged.entries)
+      setConnection(result.connection)
+      if (result.connection.dataSourceId !== settings.notionDataSourceId) update({ notionDataSourceId: result.connection.dataSourceId })
+      onNotice(formatSyncNotice(`已从 Notion 拉取 ${result.entries.length} 条记录`, result.warnings))
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function handlePush() {
+    if (!isConfigured) {
+      onNotice('请先填写 Token 和 Database ID')
+      return
+    }
+    setBusy('pushing')
+    try {
+      const tagNames = new Map(tags.map((tag) => [tag.id, tag.name]))
+      const result = await pushNotionEntries(
+        settings.notionToken,
+        settings.notionDatabaseId,
+        settings.notionDataSourceId,
+        entries.map((entry) => ({
+          localId: entry.id,
+          remoteId: entry.remote?.provider === 'notion' ? entry.remote.id : undefined,
+          date: entry.date,
+          title: entry.title,
+          content: entry.content,
+          tagNames: entry.tagIds.map((tagId) => tagNames.get(tagId)).filter((name): name is string => Boolean(name)),
+          attachments: entry.attachments,
+        })),
+      )
+      applyPushResult(result, onChangeEntries, entries)
+      setConnection(result.connection)
+      if (result.connection.dataSourceId !== settings.notionDataSourceId) update({ notionDataSourceId: result.connection.dataSourceId })
+      onNotice(formatSyncNotice(`已推送 ${result.entries.length} 条本地记录`, result.warnings))
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  const busyLabel = busy === 'checking' ? '正在检查连接…' : busy === 'pulling' ? '正在从 Notion 拉取…' : busy === 'pushing' ? '正在推送本地记录…' : '连接状态：未检查'
+  const mapping = connection?.mapping
+
   return <>
     <div className="source-card source-card--notion">
-      <div className="source-card-top"><div className="notion-logo">N</div><div><strong>Notion</strong><span>首个外部数据源 · 先完成连接配置</span></div><span className="connection-badge"><span className={`status-dot ${isConfigured ? 'status-dot--ready' : 'status-dot--muted'}`} />{isConfigured ? '已填写配置' : '待配置'}</span></div>
+      <div className="source-card-top"><div className="notion-logo">N</div><div><strong>Notion</strong><span>真实 API 连接 · 可拉取、推送和归档记录</span></div><span className="connection-badge"><span className={`status-dot ${connection ? 'status-dot--ready' : isConfigured ? 'status-dot--muted' : 'status-dot--muted'}`} />{connection ? '已连接' : isConfigured ? '待检查' : '待配置'}</span></div>
       <div className="source-divider" />
       <div className="source-fields">
         <label className="field-label" htmlFor="notion-token"><span>Integration Token</span><span className="field-hint"><KeyRound size={12} />仅保存在本机</span></label>
-        <input id="notion-token" className="settings-input" type="password" placeholder="secret_… 或 ntn_…" value={settings.notionToken} onChange={(event) => update({ notionToken: event.target.value })} />
+        <input id="notion-token" className="settings-input" type="password" placeholder="secret_… 或 ntn_…" value={settings.notionToken} onChange={(event) => { update({ notionToken: event.target.value }); setConnection(null) }} />
         <label className="field-label" htmlFor="notion-database"><span>Database ID</span><span className="field-hint"><Link2 size={12} />从数据库链接中复制</span></label>
-        <input id="notion-database" className="settings-input" placeholder="32 位 Database ID" value={settings.notionDatabaseId} onChange={(event) => update({ notionDatabaseId: event.target.value })} />
+        <input id="notion-database" className="settings-input" placeholder="32 位 Database ID" value={settings.notionDatabaseId} onChange={(event) => { update({ notionDatabaseId: event.target.value, notionDataSourceId: '' }); setConnection(null) }} />
       </div>
-      <div className="source-card-footer"><span><Cloud size={15} />真实同步适配器将在后续版本接入</span><button type="button" className="secondary-button" onClick={() => onNotice(isConfigured ? '配置已保存，Notion 同步适配器待接入' : '请先填写 Token 和 Database ID')}><RefreshCw size={15} />检查配置</button></div>
+      {connection && connection.dataSources.length > 1 && <div className="notion-data-source-picker"><label className="field-label" htmlFor="notion-data-source"><span>Data source</span><span className="field-hint">该数据库包含多个数据源</span></label><select id="notion-data-source" className="settings-input" value={settings.notionDataSourceId} onChange={(event) => { update({ notionDataSourceId: event.target.value }); setConnection(null) }}>{connection.dataSources.map((source) => <option key={source.id} value={source.id}>{source.name} · {source.id}</option>)}</select></div>}
+      {connection && <div className="notion-connection-panel"><div className="notion-connection-heading"><span><Check size={14} />已连接到 {connection.databaseTitle}</span><small>{connection.dataSourceName}</small></div><div className="notion-mapping-grid"><span>标题：{mapping?.titleProperty ?? '未识别'}</span><span>日期：{mapping?.dateProperty ?? '未识别'}</span><span>正文：{mapping?.contentProperty ?? '未配置'}</span><span>标签：{mapping?.tagsProperty ?? '未配置'}</span><span>附件：{mapping?.filesProperty ?? '未配置'}</span></div>{mapping && !mapping.ready && <div className="notion-mapping-error">{mapping.message}</div>}<div className="notion-schema-list">{connection.properties.map((property) => <span key={`${property.id}-${property.name}`}><b>{property.name}</b><small>{property.propertyType}</small></span>)}</div></div>}
+      <div className="source-card-footer source-card-footer--notion"><span><RefreshCw size={15} className={busy !== 'idle' ? 'spin' : ''} />{busyLabel}</span><div className="notion-actions"><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleCheckConnection() }}><RefreshCw size={15} />检查连接</button><button type="button" className="secondary-button" disabled={busy !== 'idle' || !isConfigured} onClick={() => { void handlePull() }}><ArrowLeft size={15} />拉取 Notion</button><button type="button" className="primary-button" disabled={busy !== 'idle' || !isConfigured} onClick={() => { void handlePush() }}><Cloud size={15} />推送本地</button></div></div>
     </div>
     <NotionSetupGuide />
-    <div className="info-banner"><Sparkles size={16} /><span><strong>数据映射建议：</strong>Notion 数据库至少包含 Date、Title、Content 和 Tags 属性。当前版本先保存连接配置，真实读写同步将在适配器接入后启用。</span></div>
+    <div className="info-banner"><Sparkles size={16} /><span><strong>同步规则：</strong>CalendarMark 会自动发现 Database 下的 data source，并按类型映射标题、日期、正文、标签和附件。拉取会把远端页面合并到本地；推送会创建新页面或更新已有页面。若 Notion 缺少可选字段，结果中的警告会说明哪些内容留在本机。</span></div>
   </>
+}
+
+function mergeNotionEntries(records: NotionEntryRecord[], currentEntries: CalendarEntry[], currentTags: Tag[]): { entries: CalendarEntry[]; tags: Tag[] } {
+  const nextEntries = [...currentEntries]
+  const nextTags = [...currentTags]
+  const tagByName = new Map(nextTags.map((tag) => [tag.name.toLowerCase(), tag]))
+  const syncedAt = new Date().toISOString()
+
+  for (const record of records) {
+    const tagIds = record.tagNames.map((name) => {
+      const cleanName = name.trim()
+      if (!cleanName) return undefined
+      const key = cleanName.toLowerCase()
+      const existing = tagByName.get(key)
+      if (existing) return existing.id
+      const tag: Tag = { id: createId('tag'), name: cleanName, color: TAG_COLORS[nextTags.length % TAG_COLORS.length] }
+      nextTags.push(tag)
+      tagByName.set(key, tag)
+      return tag.id
+    }).filter((tagId): tagId is string => Boolean(tagId))
+    const attachments = record.attachments.map((attachment, index) => ({
+      id: attachment.remoteId ?? `notion-${record.remoteId}-${index}`,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+      dataUrl: '',
+      sourceUrl: attachment.sourceUrl,
+      remoteId: attachment.remoteId,
+      remoteFile: attachment.remoteFile,
+    }))
+    const existingIndex = nextEntries.findIndex((entry) => entry.remote?.provider === 'notion' && entry.remote.id === record.remoteId)
+    const previous = existingIndex >= 0 ? nextEntries[existingIndex] : undefined
+    const merged: CalendarEntry = {
+      id: previous?.id ?? createId('entry'),
+      date: record.date,
+      title: record.title,
+      content: record.content,
+      tagIds,
+      attachments,
+      updatedAt: record.updatedAt || syncedAt,
+      remote: { provider: 'notion', id: record.remoteId, dataSourceId: record.dataSourceId, lastSyncedAt: syncedAt },
+    }
+    if (existingIndex >= 0) nextEntries[existingIndex] = merged
+    else nextEntries.push(merged)
+  }
+
+  return { entries: nextEntries, tags: nextTags }
+}
+
+function applyPushResult(result: NotionPushResult, onChangeEntries: (entries: CalendarEntry[]) => void, currentEntries: CalendarEntry[]) {
+  const pushedByLocalId = new Map(result.entries.map((entry) => [entry.localId, entry]))
+  const syncedAt = new Date().toISOString()
+  onChangeEntries(currentEntries.map((entry) => {
+    const pushed = pushedByLocalId.get(entry.id)
+    if (!pushed) return entry
+    return {
+      ...entry,
+      updatedAt: pushed.updatedAt || entry.updatedAt,
+      remote: { provider: 'notion', id: pushed.remoteId, dataSourceId: pushed.dataSourceId, lastSyncedAt: syncedAt },
+    }
+  }))
+}
+
+function formatSyncNotice(message: string, warnings: string[]): string {
+  if (!warnings.length) return message
+  return `${message}；${warnings.slice(0, 2).join('；')}${warnings.length > 2 ? `（另有 ${warnings.length - 2} 条警告）` : ''}`
 }
 
 function NotionSetupGuide() {
@@ -588,7 +774,7 @@ function NotionSetupGuide() {
       <div className="notion-guide-step"><span className="notion-guide-number">2</span><div><strong>把目标数据库分享给连接</strong><p>打开目标数据库右上角的 <b>•••</b>，选择 Add connections，搜索刚创建的连接并确认。没有这一步，API 无法访问数据库。</p></div></div>
       <div className="notion-guide-step"><span className="notion-guide-number">3</span><div><strong>复制 Database ID</strong><p>将数据库作为整页打开，点击 Share → Copy link。复制 URL 中 workspace 后、<code>?v=</code> 前的 32 位字符串。</p><code className="notion-url-example">https://www.notion.so/workspace/<b>database_id</b>?v=view_id</code></div></div>
     </div>
-    <div className="notion-guide-note"><KeyRound size={14} /><span>不要把 Token 发给别人、放进截图或提交到 Git；当前 MVP 只在本机保存配置。一个数据库包含多个 data source 时，后续同步适配器还会从 Database ID 继续发现对应的 data source ID。</span></div>
+    <div className="notion-guide-note"><KeyRound size={14} /><span>不要把 Token 发给别人、放进截图或提交到 Git。CalendarMark 会从 Rust 侧直接请求 Notion API，不经过 CalendarMark 自有服务；一个数据库包含多个 data source 时，可以在连接成功后选择目标 data source。</span></div>
   </section>
 }
 

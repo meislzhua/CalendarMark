@@ -15,7 +15,7 @@
 ┌──────────────────────────┼──────────────────────────────────┐
 │ Rust / Tauri 2            │                                  │
 │  tray icon · hide on close · global-shortcut plugin          │
-│  future: secure storage · Notion HTTP adapter               │
+│  Notion HTTP adapter · field mapping · pagination            │
 └──────────────────────────┼──────────────────────────────────┘
                            │
               Windows / macOS / Android targets
@@ -46,6 +46,10 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 - `registerGlobalShortcut()`：处理快捷键注册、修改时注销旧组合、浏览器降级。
 - `listenForSettingsOpen()`：接收 Rust 托盘发出的 `calendar-mark:open-settings` 事件。
 
+### `src/notion.ts`
+
+只负责 Tauri IPC 的类型和调用封装：检查连接、拉取页面、推送记录和归档页面。浏览器预览不会直接访问 Notion；点击同步按钮时会提示需要使用 Tauri 桌面版或 Android 版。
+
 ### `src/App.tsx`
 
 当前 MVP 使用单一页面状态管理，`view` 区分日历/设置，`drawerOpen` 控制记录抽屉；以后可以按需要拆成 `CalendarPage`、`EntryDrawer`、`SettingsPage`，但目前集中实现有利于快速验证产品流程。
@@ -61,6 +65,17 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 5. 托盘“设置”显示窗口并 emit `calendar-mark:open-settings`。
 6. 托盘“退出”调用 `app.exit(0)`。
 7. 拦截主窗口 `CloseRequested`，改为 `hide()`。
+8. 注册 Notion 命令，将 Token 留在 Rust 命令调用边界内，不把 Notion API 请求放进 React WebView。
+
+`src-tauri/src/notion.rs` 使用 `reqwest` + Rustls 调用 Notion REST API，当前实现：
+
+- `Retrieve a database`：根据 Database ID 发现所有 `data_sources`，允许用户选择目标 data source。
+- `Retrieve a data source`：读取 schema，并按属性类型自动识别 title、date、rich_text、multi_select、files。
+- `POST /data_sources/{id}/query`：分页拉取页面，处理游标重复和异常分页响应。
+- `POST /pages` / `PATCH /pages/{id}`：创建或更新本地记录对应的页面。
+- `POST /file_uploads` + multipart send：上传本地 Data URL 附件并将 file upload ID 写入 files 属性。
+- `PATCH /pages/{id}` with `in_trash=true`：删除本地远端关联记录时归档页面。
+- 对 429 和 5xx 做最多三次短退避重试，错误消息只返回 Notion 的状态和 message，不输出 Token。
 
 Android 不创建桌面托盘，相关代码由 `#[cfg(desktop)]` 排除；React 页面和数据模型继续复用。
 
@@ -75,6 +90,12 @@ type CalendarEntry = {
   tagIds: string[]
   attachments: Attachment[]
   updatedAt: string  // ISO 8601
+  remote?: {
+    provider: DataSourceId
+    id: string
+    dataSourceId?: string
+    lastSyncedAt?: string
+  }
 }
 
 type Attachment = {
@@ -94,35 +115,40 @@ type Attachment = {
 
 ```text
 DataSourceDefinition[]
-├── Notion          preview  → Token / Database ID / 连接引导
+├── Notion          active   → Token / Database ID / data source / 同步操作
 ├── 本地存储         active   → 无需配置
 ├── WebDAV           planned
 └── Obsidian Vault   planned
 ```
 
-`AppSettings.dataSource` 只保存当前选择，Notion 专属字段仍以 `notionToken` 和 `notionDatabaseId` 保存。这样切换到其他 provider 时不会丢弃已有 Notion 配置，也不会把外部数据源的字段塞进一个不可扩展的通用表单。
+`AppSettings.dataSource` 只保存当前选择，Notion 专属字段保存 `notionToken`、`notionDatabaseId` 和用户选中的 `notionDataSourceId`。这样切换到其他 provider 时不会丢弃已有 Notion 配置，也不会把外部数据源的字段塞进一个不可扩展的通用表单。
 
-推荐下一阶段加入 `src/dataSources/`：
+Notion 同步路径如下：
 
 ```text
-DataSource
-├── connect(): Result
-├── pull(range): CalendarEntry[]
-├── push(entries): SyncResult
-└── disconnect(): void
+Database ID
+    │
+    ▼
+Retrieve database ── discover data_sources ── select data source
+    │                                          │
+    ▼                                          ▼
+Retrieve schema ── property mapping      query pages (cursor pagination)
+    │                                          │
+    └─────────────── connection result ────────┘
+                         │
+             pull merge / push create-or-update
 ```
 
-`NotionDataSource` 应由 Rust 侧通过 HTTP client 请求 Notion API，前端只传递用户操作和已脱敏的同步结果。设置页已内嵌连接引导：创建 Internal connection、将数据库通过 Add connections 分享给连接、从 Share → Copy link 提取 Database ID。Token 存储优先使用系统 Keychain/Windows Credential Manager，而不是 localStorage。同步应包含：分页、指数退避、字段映射校验、远端 `last_edited_time` 与本地 `updatedAt` 的冲突策略。
-
-Notion 当前 API 还区分 database container 与 data source：用户先提供 Database ID，连接成功后由适配器调用 Retrieve a database 发现 `data_sources`，再使用对应的 data source ID 读取 schema 和记录。
+当前同步是用户主动触发的“拉取 / 推送”模型，不会后台自动覆盖本地记录。远端页面 ID 保存在 `CalendarEntry.remote`，推送时据此决定创建还是更新；拉取时按该引用更新已有条目，不会删除本地未出现在远端结果中的条目。
 
 ## 6. 权限和安全
 
 - `src-tauri/capabilities/default.json` 只开放 core 默认能力以及全局快捷键 register/unregister。
 - 不打开 shell、任意文件系统或任意远程 URL 权限。
-- CSP 当前为 `null` 以支持 Vite/Tauri MVP；生产发布接入 Notion API 前应收紧 CSP，并把网络请求放入 Rust。
-- 附件当前是本地 Data URL，后续应迁移到应用数据目录并做大小/类型校验。
-- Notion Token 不发送给 CalendarMark 服务；未实现真实同步前不会发起 Notion 网络请求。
+- CSP 当前为 `null` 以支持 Vite/Tauri MVP；Notion 请求已经放入 Rust，生产发布仍应收紧 WebView CSP。
+- 当前 Token 随 `AppSettings` 保存在 WebView localStorage，方便 MVP 使用但不是系统级密钥链；正式发布前应迁移到 Tauri Store 的安全后端或系统 Keychain。
+- Notion Token 不发送给 CalendarMark 服务。拉取的文件 URL 是 Notion 返回的临时 URL；本地附件先作为 Data URL 保存并在推送时通过 File Upload API 上传，后续应把附件迁移到应用数据目录。
+- 当前没有自动冲突解决、后台队列或离线重试；双端同时编辑时以用户最后一次显式拉取/推送为准。
 
 ## 7. 跨平台策略
 

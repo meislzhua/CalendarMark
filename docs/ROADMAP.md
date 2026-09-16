@@ -10,17 +10,16 @@
 - Windows/macOS 托盘、关闭隐藏、全局快捷键。
 - 可替换数据源选择器（Notion、本地存储、WebDAV/Obsidian 规划位）。
 - Notion 配置界面、Token/Database ID 获取引导和数据映射约定。
+- Notion 真实 API 适配器：连接检查、Database → data source 发现、schema 映射、分页拉取。
+- 本地记录推送/更新、Notion 页面归档、File Upload 附件上传和同步警告。
 - Windows/macOS/Android GitHub Actions 构建入口。
 
-## 下一步：Notion 连接（0.2）
+## 下一步：可靠同步和凭据安全（0.2.x）
 
-- 将 provider 状态从配置预览升级为真实连接状态。
-- Rust Notion HTTP client 和分页查询。
-- Token 使用系统安全存储。
-- Database 字段映射向导。
-- Database ID → data source ID 发现流程。
-- 首次连接的只读拉取和本地预览。
-- 本地记录推送、同步状态和失败重试。
+- Token 从 WebView localStorage 迁移到系统 Keychain / Windows Credential Manager。
+- 拉取/推送冲突对比、离线队列和可恢复重试。
+- 可视化字段映射向导，支持同一 data source 中多个候选字段。
+- 后台同步策略和最近同步历史。
 
 ## 后续：可靠本地资料库（0.3）
 

@@ -12,6 +12,19 @@ export type Attachment = {
   mimeType: string
   size: number
   dataUrl: string
+  sourceUrl?: string
+  remoteId?: string
+  remoteFile?: {
+    kind: 'file' | 'external'
+    value: Record<string, unknown>
+  }
+}
+
+export type EntryRemoteRef = {
+  provider: DataSourceId
+  id: string
+  dataSourceId?: string
+  lastSyncedAt?: string
 }
 
 export type CalendarEntry = {
@@ -22,6 +35,7 @@ export type CalendarEntry = {
   tagIds: string[]
   attachments: Attachment[]
   updatedAt: string
+  remote?: EntryRemoteRef
 }
 
 export type ThemeMode = 'light' | 'dark' | 'auto'
@@ -43,8 +57,8 @@ export const DATA_SOURCE_DEFINITIONS: DataSourceDefinition[] = [
     id: 'notion',
     label: 'Notion',
     description: '云端数据库，适合跨设备同步',
-    detail: '首个外部数据源 · 配置预览',
-    status: 'preview',
+    detail: '已接入 · API 同步',
+    status: 'active',
   },
   {
     id: 'local',
@@ -75,6 +89,7 @@ export type AppSettings = {
   dataSource: DataSourceId
   notionToken: string
   notionDatabaseId: string
+  notionDataSourceId: string
 }
 
 export const TAG_COLORS: TagColor[] = [
@@ -99,6 +114,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   dataSource: 'notion',
   notionToken: '',
   notionDatabaseId: '',
+  notionDataSourceId: '',
 }
 
 export function createId(prefix: string): string {

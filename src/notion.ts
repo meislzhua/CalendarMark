@@ -1,0 +1,154 @@
+import { invoke } from '@tauri-apps/api/core'
+import { isTauriRuntime } from './tauri'
+
+export type NotionPropertyInfo = {
+  name: string
+  id: string
+  propertyType: string
+}
+
+export type NotionDataSourceOption = {
+  id: string
+  name: string
+}
+
+export type NotionMappingInfo = {
+  ready: boolean
+  titleProperty?: string
+  dateProperty?: string
+  contentProperty?: string
+  tagsProperty?: string
+  filesProperty?: string
+  message?: string
+}
+
+export type NotionConnectionInfo = {
+  databaseId: string
+  databaseTitle: string
+  dataSourceId: string
+  dataSourceName: string
+  dataSources: NotionDataSourceOption[]
+  properties: NotionPropertyInfo[]
+  mapping: NotionMappingInfo
+}
+
+export type NotionAttachmentRecord = {
+  name: string
+  mimeType: string
+  size: number
+  sourceUrl?: string
+  remoteId?: string
+  remoteFile?: {
+    kind: 'file' | 'external'
+    value: Record<string, unknown>
+  }
+}
+
+export type NotionEntryRecord = {
+  remoteId: string
+  dataSourceId: string
+  date: string
+  title: string
+  content: string
+  tagNames: string[]
+  attachments: NotionAttachmentRecord[]
+  updatedAt: string
+  url?: string
+}
+
+export type NotionPullResult = {
+  connection: NotionConnectionInfo
+  entries: NotionEntryRecord[]
+  warnings: string[]
+}
+
+export type NotionAttachmentInput = {
+  id: string
+  name: string
+  mimeType: string
+  size: number
+  dataUrl: string
+  sourceUrl?: string
+  remoteId?: string
+  remoteFile?: {
+    kind: 'file' | 'external'
+    value: Record<string, unknown>
+  }
+}
+
+export type NotionEntryInput = {
+  localId: string
+  remoteId?: string
+  date: string
+  title: string
+  content: string
+  tagNames: string[]
+  attachments: NotionAttachmentInput[]
+}
+
+export type NotionPushRecord = {
+  localId: string
+  remoteId: string
+  dataSourceId: string
+  updatedAt: string
+  url?: string
+  uploadedAttachments: number
+}
+
+export type NotionPushResult = {
+  connection: NotionConnectionInfo
+  entries: NotionPushRecord[]
+  warnings: string[]
+}
+
+function ensureTauriRuntime(): void {
+  if (!isTauriRuntime()) {
+    throw new Error('请在 Tauri 桌面版或 Android 版中使用 Notion 同步')
+  }
+}
+
+export async function checkNotionConnection(
+  token: string,
+  databaseId: string,
+  dataSourceId?: string,
+): Promise<NotionConnectionInfo> {
+  ensureTauriRuntime()
+  return invoke<NotionConnectionInfo>('notion_check_connection', {
+    token,
+    databaseId,
+    dataSourceId: dataSourceId || null,
+  })
+}
+
+export async function pullNotionEntries(
+  token: string,
+  databaseId: string,
+  dataSourceId?: string,
+): Promise<NotionPullResult> {
+  ensureTauriRuntime()
+  return invoke<NotionPullResult>('notion_pull_entries', {
+    token,
+    databaseId,
+    dataSourceId: dataSourceId || null,
+  })
+}
+
+export async function pushNotionEntries(
+  token: string,
+  databaseId: string,
+  dataSourceId: string | undefined,
+  entries: NotionEntryInput[],
+): Promise<NotionPushResult> {
+  ensureTauriRuntime()
+  return invoke<NotionPushResult>('notion_push_entries', {
+    token,
+    databaseId,
+    dataSourceId: dataSourceId || null,
+    entries,
+  })
+}
+
+export async function archiveNotionPage(token: string, pageId: string): Promise<void> {
+  ensureTauriRuntime()
+  await invoke('notion_archive_page', { token, pageId })
+}

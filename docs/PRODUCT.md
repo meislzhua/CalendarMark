@@ -42,7 +42,7 @@ CalendarMark
 - **像纸张一样安静**：米白画布、绿色主色、低对比边界，减少工具感。
 - **信息密度可控**：日历格子只展示最多两个标签，其余用 `+N` 收起。
 - **上下文不丢失**：日期编辑使用右侧抽屉，不跳转页面；抽屉关闭时保留月份和选中日期。
-- **反馈要即时**：保存、删除、标签变更和 Notion 配置检查均提供轻量 toast。
+- **反馈要即时**：保存、删除、标签变更和 Notion 连接/同步结果均提供轻量 toast。
 - **桌面优先、移动可用**：桌面使用侧边栏；窄屏时侧边栏收缩为图标，设置导航转为图标栏。
 
 ## 5. 关键交互
@@ -66,7 +66,7 @@ CalendarMark
 
 数据源设置不把 Notion 写死为唯一选项，而是使用可替换的数据源选择器。当前提供：
 
-- **Notion**：首个外部数据源，当前为配置预览状态。
+- **Notion**：首个已实现的外部数据源，支持连接检查、data source 选择、拉取、推送、页面归档和附件上传。
 - **本地存储**：当前可用，适合离线记录。
 - **WebDAV / Obsidian Vault**：展示为规划中的数据源，暂不允许连接。
 
@@ -82,14 +82,16 @@ CalendarMark
 | `tagIds` | Tags | multi_select |
 | `attachments` | Attachments | files / URL |
 
-MVP 先保存 Token 和 Database ID 配置，不在前端直连 Notion，避免令牌暴露在 WebView 和浏览器网络层。真实同步时还需要根据 Database ID 发现对应的 data source ID。
+CalendarMark 不在前端直连 Notion，而是通过 Tauri IPC 将操作交给 Rust 适配器，避免把请求逻辑和令牌放进浏览器网络层。连接时根据 Database ID 发现 data source，读取 schema 后按属性类型建立映射；至少需要一个 `title` 和一个 `date` 属性。同步由用户显式点击“拉取 Notion”或“推送本地”触发。
+
+推送规则：没有 `remote` 引用的本地记录创建 Notion 页面，已有引用的记录更新对应页面；本地附件通过 Notion File Upload API 上传到 `files` 属性。删除带远端引用的本地记录时，CalendarMark 会先将 Notion 页面移入回收站。
 
 ## 6. 非目标（MVP 不做）
 
 - 多人协作、账户系统、CalendarMark 云端服务。
 - 复杂任务管理、提醒、重复事件和全天事件语义。
 - 在本地存储层直接保存大量原图或视频。
-- Notion 双向同步的冲突合并与离线队列。
+- Notion 双向同步的自动冲突合并、后台队列和离线重试。
 
 ## 7. 验收清单
 
@@ -100,5 +102,6 @@ MVP 先保存 Token 和 Database ID 配置，不在前端直连 Notion，避免�
 - [x] 图片和文档附件加入草稿。
 - [x] 右侧抽屉带打开/关闭动画。
 - [x] 设置页包含可替换数据源选择器、Notion 引导、快捷键、界面、标签管理。
+- [x] Notion 真实连接、schema 映射、分页拉取、页面创建/更新、归档和附件上传。
 - [x] Tauri 托盘、关闭隐藏、桌面快捷键桥接。
 - [x] GitHub Actions 覆盖 Windows、macOS、Android 构建入口。
