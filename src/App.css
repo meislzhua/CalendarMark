@@ -87,18 +87,16 @@ textarea:focus-visible {
 
 .app-shell {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
   overflow: hidden;
   background: var(--canvas);
 }
 
-/* 应用式布局：桌面窗口与抽屉模式都禁止页面级滚动，
-   滚轮只作用于内容自身的滚动容器，避免整页被滚没 */
-@media (min-width: 821px) {
-  html,
-  body {
-    overflow: hidden;
-  }
+/* 应用式布局：任何窗口尺寸都禁止页面级滚动，
+   滚轮只作用于 main-area 或内部滚动容器，避免整页被滚没 */
+html,
+body {
+  overflow: hidden;
 }
 
 .sidebar {
@@ -365,7 +363,9 @@ kbd {
 .main-area {
   width: calc(100% - 235px);
   min-width: 0;
-  min-height: 100vh;
+  height: 100vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 34px 39px 54px;
 }
 
@@ -2911,6 +2911,10 @@ html[data-ui-mode='drawer'] body {
   display: none;
 }
 
+[data-ui-mode='drawer'] .brand-lockup {
+  flex: 0 0 auto;
+}
+
 [data-ui-mode='drawer'] .sidebar-section-label,
 [data-ui-mode='drawer'] .quick-links,
 [data-ui-mode='drawer'] .shortcut-hint,
@@ -2919,21 +2923,33 @@ html[data-ui-mode='drawer'] body {
 }
 
 [data-ui-mode='drawer'] .primary-nav {
+  display: flex;
   flex-direction: row;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  min-width: 0;
   margin-top: 0;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  padding: 3px;
+  background: var(--surface-muted);
   gap: 6px;
 }
 
 [data-ui-mode='drawer'] .nav-item {
   flex: 0 0 auto;
   min-height: 34px;
+  border-radius: 8px;
+  background: transparent;
   padding: 0 11px;
   gap: 6px;
+  color: var(--ink-muted);
 }
 
 /* 窄窗口会同时命中移动断点（隐藏文字、压缩间距），这里恢复抽屉顶栏的横向标签形态 */
 [data-ui-mode='drawer'] .nav-item > span:first-of-type {
   display: block;
+  white-space: nowrap;
 }
 
 [data-ui-mode='drawer'] .nav-item > svg {
@@ -2947,9 +2963,10 @@ html[data-ui-mode='drawer'] body {
 [data-ui-mode='drawer'] .main-area {
   width: 100%;
   flex: 1 1 auto;
-  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  min-height: 0;
+  height: auto;
   padding: 16px 14px 26px;
 }
 
@@ -3148,4 +3165,243 @@ html[data-ui-mode='drawer'] body {
   padding: 13px 14px;
   color: var(--ink-faint);
   font-size: 10px;
+}
+
+/* --- 日历总览新布局：日历 + 常驻记录面板 --- */
+
+.overview-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 350px);
+  align-items: stretch;
+  /* 日历与记录面板共享视口剩余高度，面板不超出屏幕 */
+  height: calc(100vh - 223px);
+  min-height: 480px;
+}
+
+.entry-panel {
+  display: flex;
+  height: 100%;
+  max-height: 100%;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.entry-panel .editor-form {
+  display: flex;
+  max-height: 100%;
+  flex-direction: column;
+}
+
+.entry-panel .drawer-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.calendar-column {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+}
+
+@media (max-width: 1000px) {
+  .overview-grid {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 0;
+  }
+
+  .entry-panel {
+    height: auto;
+    max-height: 70vh;
+    position: static;
+  }
+
+  .calendar-column {
+    overflow-y: visible;
+  }
+}
+
+[data-ui-mode='drawer'] .overview-grid {
+  grid-template-columns: 1fr;
+}
+
+[data-ui-mode='drawer'] .entry-panel {
+  position: static;
+  height: auto;
+  max-height: 72vh;
+}
+
+/* --- 心情选择 --- */
+
+.mood-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mood-choice {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0;
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 17px;
+  line-height: 1;
+  transition: border-color .14s ease, transform .14s ease, background .14s ease;
+}
+
+.mood-choice:hover {
+  border-color: var(--green);
+  transform: translateY(-1px);
+}
+
+.mood-choice--active {
+  border-color: var(--green);
+  background: var(--green-tint);
+  box-shadow: inset 0 0 0 1px var(--green);
+}
+
+.day-mood {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.calendar-day--has-entry .day-number {
+  color: var(--green-deep);
+  font-weight: 800;
+}
+
+/* --- 年月快捷选择 --- */
+
+.month-title-wrap {
+  position: relative;
+}
+
+.month-title-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 8px;
+  padding: 4px 8px;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+  transition: background .14s ease;
+}
+
+.month-title-button:hover {
+  background: var(--green-tint);
+}
+
+.month-title-button h2 {
+  margin: 0;
+}
+
+.month-title-button svg {
+  color: var(--ink-faint);
+  transition: transform .16s ease;
+}
+
+.month-title-button[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+.month-picker {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 45;
+  width: 252px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-md, 0 18px 40px rgba(31, 47, 38, .16));
+  animation: tag-dates-in .16s ease;
+}
+
+.month-picker-year {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 9px;
+  margin-bottom: 9px;
+}
+
+.month-picker-year strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.month-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.month-picker-item {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  transition: border-color .13s ease, background .13s ease, color .13s ease;
+}
+
+.month-picker-item:hover {
+  border-color: var(--green);
+  color: var(--green-deep);
+}
+
+.month-picker-item.active {
+  border-color: var(--green);
+  background: var(--green-tint);
+  color: var(--green-deep);
+}
+
+/* --- 侧栏数据源按钮 & Token 帮助 --- */
+
+.data-source-mini--action {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color .14s ease, background .14s ease;
+}
+
+.data-source-mini--action:hover {
+  border-color: var(--green);
+  background: var(--green-tint);
+}
+
+.data-source-mini--action > svg {
+  margin-left: auto;
+  color: var(--ink-faint);
+}
+
+.source-fields {
+  position: relative;
+}
+
+.notion-token-help {
+  position: absolute;
+  top: 4px;
+  right: 0;
 }

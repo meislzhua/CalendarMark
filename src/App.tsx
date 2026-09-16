@@ -2,28 +2,24 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, Dispatch, FormEvent, ReactNode, SetStateAction } from 'react'
 import {
   ArrowLeft,
-  ArrowRight,
   AppWindow,
   BookOpen,
   CalendarDays,
   Check,
   ChevronLeft,
+  ChevronDown,
   ChevronRight,
   CircleHelp,
   Cloud,
-  Command,
   Database,
   FileImage,
   FileText,
   ExternalLink,
   HardDrive,
-  Hash,
   KeyRound,
   Keyboard,
-  Layers3,
   Monitor,
   Moon,
-  MoreHorizontal,
   PanelRightClose,
   Palette,
   PanelRight,
@@ -39,12 +35,12 @@ import {
   Trash2,
   Upload,
   X,
-  Zap,
 } from 'lucide-react'
 import './App.css'
 import {
   DATA_SOURCE_DEFINITIONS,
   DEFAULT_SETTINGS,
+  MOOD_OPTIONS,
   TAG_COLORS,
   createId,
   formatDateKey,
@@ -69,6 +65,7 @@ import {
 } from './storage'
 import {
   applyUiMode,
+  openInExternalBrowser,
   readAutostartEnabled,
   setAutostartEnabled,
   hideMainWindow,
@@ -79,7 +76,6 @@ import {
   toggleMainWindow,
 } from './tauri'
 import {
-  archiveNotionPage,
   checkNotionConnection,
   createNotionDatabase,
   discoverNotionDatasets,
@@ -87,6 +83,11 @@ import {
   pushNotionEntries,
   searchNotionPages,
 } from './notion'
+import {
+  createLocalDataSource,
+  createNotionDataSource,
+} from './data-source'
+import type { CalendarDataSource } from './data-source'
 import type {
   NotionConnectionInfo,
   NotionDatasetOption,
@@ -201,6 +202,7 @@ function toNotionEntryInput(entry: CalendarEntry, tags: Tag[], dataSourceId?: st
     tagNames: entry.tagIds
       .map((tagId) => tagNames.get(tagId))
       .filter((name): name is string => Boolean(name)),
+    mood: entry.mood,
     attachments: entry.attachments,
   }
 }
@@ -216,7 +218,6 @@ function App() {
     return new Date(now.getFullYear(), now.getMonth(), 1)
   })
   const [selectedDate, setSelectedDate] = useState(today)
-  const [drawerOpen, setDrawerOpen] = useState(false)
   const [settings, setSettings] = useState<AppSettings>(loadSettings)
   const [entries, setEntries] = useState<CalendarEntry[]>(() => settings.dataSource === 'notion' ? [] : loadEntries())
   const [tags, setTags] = useState<Tag[]>(() => settings.dataSource === 'notion' ? [] : loadTags())
@@ -226,15 +227,29 @@ function App() {
   const [drawerSlideIn, setDrawerSlideIn] = useState(true)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [tagDatesFor, setTagDatesFor] = useState<Tag | null>(null)
+  const [tagDates, setTagDates] = useState<Array<{ date: string; title: string }>>([])
+  const [tagDatesLoading, setTagDatesLoading] = useState(false)
+  const [settingsJumpTo, setSettingsJumpTo] = useState<SettingsSection | null>(null)
+  const [monthPickerOpen, setMonthPickerOpen] = useState(false)
   const [shortcutState, setShortcutState] = useState<'ready' | 'browser' | 'error'>('browser')
   const [notice, setNotice] = useState('')
   const [remoteDataState, setRemoteDataState] = useState<RemoteDataState>(settings.dataSource === 'notion' ? 'needs-config' : 'local')
   const previousDataSourceRef = useRef<AppSettings['dataSource'] | null>(null)
   const previousNotionTargetRef = useRef<string | null>(null)
+  const loadedMonthsRef = useRef<Set<string>>(new Set())
   const [remoteReloadToken, setRemoteReloadToken] = useState(0)
   const skipLocalSaveRef = useRef(false)
   const notionTarget = getNotionTarget(settings)
   const notionTargetKey = `${notionTarget.databaseId}:${notionTarget.dataSourceId}`
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
+
+  // 统一数据源接口：UI 不感知本地/远程差异，Notion 实现负责筛选、分页与远端引用
+  const dataSource = useMemo<CalendarDataSource>(() => (
+    settings.dataSource === 'notion'
+      ? createNotionDataSource(() => settingsRef.current)
+      : createLocalDataSource()
+  ), [settings.dataSource, settings.notionToken, notionTarget.databaseId, notionTarget.dataSourceId])
 
   const calendarCells = useMemo(() => getCalendarCells(currentMonth), [currentMonth])
   const monthTitle = new Intl.DateTimeFormat('zh-CN', {
@@ -268,49 +283,56 @@ function App() {
     if (sourceChanged || targetChanged) {
       setEntries([])
       setTags([])
+      loadedMonthsRef.current.clear()
     }
   }, [settings.dataSource, notionTargetKey])
 
+  // 远程模式按月按需加载：切换年月/刷新时只请求当前月的数据，
+  // 远端超过单页 100 条时由数据源实现负责筛选与分页，避免每次全量拉取。
   useEffect(() => {
     if (settings.dataSource !== 'notion') return undefined
     if (!settings.notionToken.trim() || !notionTarget.databaseId) {
       setRemoteDataState('needs-config')
+      loadedMonthsRef.current.clear()
       return undefined
     }
 
+    const monthKey = toDateKey(currentMonth).slice(0, 7)
     let cancelled = false
+    if (loadedMonthsRef.current.has(monthKey)) {
+      // 月份缓存命中：直接复用已加载数据，不重复请求远端
+      setRemoteDataState('ready')
+      return undefined
+    }
     setRemoteDataState('loading')
-    // Token 逐字符输入、数据集信息被连接结果规范化时都会重新触发本 effect；
-    // 用短防抖合并连续变化，避免每个按键都发起一次远端请求。
     const timer = window.setTimeout(() => {
       if (cancelled) return
-      void pullNotionEntries(settings.notionToken, notionTarget.databaseId, notionTarget.dataSourceId)
+      void dataSource.loadMonth(currentMonth.getFullYear(), currentMonth.getMonth())
         .then((result) => {
           if (cancelled) return
-          const merged = mergeNotionEntries(result.entries, [], [])
-          setEntries(merged.entries)
-          setTags(merged.tags)
-          setSettings((previous) => withNotionDataset(previous, {
-            databaseId: result.connection.databaseId,
-            databaseTitle: result.connection.databaseTitle,
-            dataSourceId: result.connection.dataSourceId,
-            dataSourceName: result.connection.dataSourceName,
-          }))
+          loadedMonthsRef.current.add(monthKey)
+          setTags((previous) => {
+            const known = new Set(previous.map((tag) => tag.name.toLowerCase()))
+            return [...previous, ...result.newTags.filter((tag) => !known.has(tag.name.toLowerCase()))]
+          })
+          setEntries((previous) => [
+            ...previous.filter((entry) => entry.date.slice(0, 7) !== monthKey),
+            ...result.entries,
+          ])
           setRemoteDataState('ready')
-          setNotice('已读取 Notion：' + result.entries.length + ' 条记录' + (result.warnings.length ? '；' + result.warnings.slice(0, 2).join('；') : ''))
         })
         .catch((error) => {
           if (cancelled) return
           setRemoteDataState('error')
           setNotice(error instanceof Error ? error.message : String(error))
         })
-    }, 500)
+    }, 400)
 
     return () => {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [settings.dataSource, settings.notionToken, notionTarget.databaseId, notionTarget.dataSourceId, remoteReloadToken])
+  }, [settings.dataSource, settings.notionToken, notionTarget.databaseId, notionTarget.dataSourceId, currentMonth, remoteReloadToken, dataSource])
 
   useEffect(() => {
     if (settings.dataSource !== 'local') return
@@ -359,7 +381,6 @@ function App() {
     let cancelled = false
     void registerGlobalShortcut(settings.shortcut, () => {
       setView('calendar')
-      setDrawerOpen(false)
       // 已聚焦时收起窗口；未聚焦或隐藏时显示并聚焦
       void toggleMainWindow()
     }).then((result) => {
@@ -375,7 +396,6 @@ function App() {
     let unlisten: (() => void) | undefined
     void listenForSettingsOpen(() => {
       setView('settings')
-      setDrawerOpen(false)
     }).then((dispose) => {
       unlisten = dispose
     })
@@ -388,16 +408,66 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [notice])
 
+  // 年月选择器：点击外部关闭
+  useEffect(() => {
+    if (!monthPickerOpen) return undefined
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as HTMLElement
+      if (!target.closest('.month-title-wrap')) setMonthPickerOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [monthPickerOpen])
+
+  // 快捷入口标签：通过数据源接口跨月查询（本地模式回退到内存过滤）
+  useEffect(() => {
+    if (!tagDatesFor) {
+      setTagDates([])
+      return undefined
+    }
+    let cancelled = false
+    setTagDatesLoading(true)
+    void dataSource.queryTagDates(tagDatesFor.name)
+      .then((remoteDates) => {
+        if (cancelled) return
+        if (dataSource.kind === 'notion') {
+          setTagDates(remoteDates)
+        } else {
+          const dates = Array.from(new Set(entries
+            .filter((entry) => entry.tagIds.includes(tagDatesFor.id))
+            .map((entry) => entry.date)))
+            .sort()
+            .reverse()
+            .map((date) => ({
+              date,
+              title: entries.find((item) => item.date === date && item.tagIds.includes(tagDatesFor.id))?.title || '未命名记录',
+            }))
+          setTagDates(dates)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTagDates([])
+      })
+      .finally(() => {
+        if (!cancelled) setTagDatesLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [tagDatesFor, dataSource, entries])
+
   const tagById = (tagId: string) => tags.find((tag) => tag.id === tagId)
 
   function openDate(dateKey: string) {
     const existing = entries.find((entry) => entry.date === dateKey)
     setDraft(existing ? { ...existing, tagIds: [...existing.tagIds], attachments: [...existing.attachments] } : createDraft(dateKey))
     setSelectedDate(dateKey)
+    // 快捷入口可能跨月：同步把日历切到对应月份
+    const [year, month] = dateKey.split('-').map(Number)
+    setCurrentMonth(new Date(year, month - 1, 1))
     setView('calendar')
     setConfirmingDelete(false)
     setTagDatesFor(null)
-    setDrawerOpen(true)
   }
 
   function moveMonth(offset: number) {
@@ -430,13 +500,9 @@ function App() {
       }
       setRemoteDataState('saving')
       try {
-        const result = await pushNotionEntries(
-          settings.notionToken,
-          target.databaseId,
-          target.dataSourceId || undefined,
-          [toNotionEntryInput(cleaned, tags, target.dataSourceId || undefined)],
-        )
-        const savedEntry = applyPushResultToEntry(cleaned, result)
+        const savedEntry = await dataSource.saveEntry(cleaned, tags)
+        const monthKey = savedEntry.date.slice(0, 7)
+        loadedMonthsRef.current.add(monthKey)
         setEntries((previous) => {
           const index = previous.findIndex((entry) => entry.id === savedEntry.id)
           if (index === -1) return [...previous, savedEntry]
@@ -444,15 +510,8 @@ function App() {
           next[index] = savedEntry
           return next
         })
-        setSettings((previous) => withNotionDataset(previous, {
-          databaseId: result.connection.databaseId,
-          databaseTitle: result.connection.databaseTitle,
-          dataSourceId: result.connection.dataSourceId,
-          dataSourceName: result.connection.dataSourceName,
-        }))
         setRemoteDataState('ready')
-        setDrawerOpen(false)
-        setNotice(formatSyncNotice('已直接保存到 Notion', result.warnings))
+        setNotice('已直接保存到 Notion')
       } catch (error) {
         setRemoteDataState('error')
         setNotice(error instanceof Error ? error.message : String(error))
@@ -460,21 +519,21 @@ function App() {
       return
     }
 
+    const savedEntry = await dataSource.saveEntry(cleaned, tags)
     setEntries((previous) => {
       const index = previous.findIndex((entry) => entry.id === cleaned.id)
-      if (index === -1) return [...previous, cleaned]
+      if (index === -1) return [...previous, savedEntry]
       const next = [...previous]
-      next[index] = cleaned
+      next[index] = savedEntry
       return next
     })
-    setDrawerOpen(false)
     setNotice('日期内容已保存')
   }
 
   async function handleDeleteEntry() {
     const existing = entries.find((entry) => entry.id === draft.id)
     if (!existing) return
-    if (settings.dataSource === 'notion' && existing.remote?.provider === 'notion') {
+    if (settings.dataSource === 'notion') {
       const target = getNotionTarget(settings)
       if (!settings.notionToken.trim() || !target.databaseId) {
         setNotice('删除 Notion 记录前，请先补全连接配置')
@@ -483,7 +542,7 @@ function App() {
       setRemoteDataState('deleting')
       try {
         setNotice('正在从 Notion 归档记录…')
-        await archiveNotionPage(settings.notionToken, existing.remote.id)
+        await dataSource.deleteEntry(existing)
       } catch (error) {
         setRemoteDataState('error')
         setNotice(error instanceof Error ? error.message : String(error))
@@ -492,7 +551,7 @@ function App() {
       setRemoteDataState('ready')
     }
     setEntries((previous) => previous.filter((entry) => entry.id !== draft.id))
-    setDrawerOpen(false)
+    setConfirmingDelete(false)
     setNotice('日期内容已删除')
   }
 
@@ -571,7 +630,6 @@ function App() {
     setNotice('标签已恢复，可再次选择')
   }
 
-  const isCurrentMonthToday = today.slice(0, 7) === toDateKey(currentMonth).slice(0, 7)
   const remoteStatusText = remoteDataState === 'loading'
     ? '正在读取'
     : remoteDataState === 'needs-config'
@@ -623,42 +681,40 @@ function App() {
               <span className="quick-link-count">{entries.filter((entry) => entry.tagIds.includes(tag.id)).length}</span>
             </button>
           ))}
-          <button className="quick-link quick-link--muted" onClick={() => { setView('settings'); setSettingsSection('tags') }}>
+          <button className="quick-link quick-link--muted" onClick={() => { setSettingsJumpTo('tags'); setView('settings') }}>
             <Plus size={15} />
             <span>管理标签</span>
           </button>
           {tagDatesFor && (
             <div className="tag-dates-popover">
               <div className="tag-dates-heading"><span className={`tag-dot tag-dot--${tagDatesFor.color}`} /><strong>{tagDatesFor.name}</strong><button type="button" className="plain-icon-button" aria-label="关闭" onClick={() => setTagDatesFor(null)}><X size={13} /></button></div>
-              {(() => {
-                const dates = Array.from(new Set(entries.filter((entry) => entry.tagIds.includes(tagDatesFor.id)).map((entry) => entry.date))).sort().reverse()
-                if (dates.length === 0) return <div className="tag-dates-empty">还没有带这个标签的记录</div>
-                return <div className="tag-dates-list">{dates.slice(0, 8).map((date) => {
-                  const entry = entries.find((item) => item.date === date && item.tagIds.includes(tagDatesFor.id))
-                  return <button key={date} type="button" className="tag-date-item" onClick={() => openDate(date)}>
-                    <span className="tag-date-day">{formatDateKey(date, { month: 'short', day: 'numeric' })}</span>
-                    <span className="tag-date-title">{entry?.title || '未命名记录'}</span>
-                  </button>
-                })}{dates.length > 8 && <div className="tag-dates-empty">还有 {dates.length - 8} 天，可在日历中查看</div>}</div>
-              })()}
+              {tagDatesLoading
+                ? <div className="tag-dates-empty">正在查询带此标签的日期…</div>
+                : tagDates.length === 0
+                  ? <div className="tag-dates-empty">还没有带这个标签的记录</div>
+                  : <div className="tag-dates-list">{tagDates.slice(0, 8).map((item) => (
+                    <button key={item.date} type="button" className="tag-date-item" onClick={() => openDate(item.date)}>
+                      <span className="tag-date-day">{formatDateKey(item.date, { month: 'short', day: 'numeric' })}</span>
+                      <span className="tag-date-title">{item.title}</span>
+                    </button>
+                  ))}{tagDates.length > 8 && <div className="tag-dates-empty">还有 {tagDates.length - 8} 天，可在日历中查看</div>}</div>}
             </div>
           )}
         </div>
 
         <div className="sidebar-footer">
-          <div className="shortcut-hint">
-            <div className="shortcut-hint-icon"><Zap size={15} /></div>
-            <div>
-              <span>快速打开</span>
-              <kbd>{settings.shortcut.replace('CommandOrControl', 'Ctrl')}</kbd>
-            </div>
-          </div>
-          <div className="data-source-mini">
+          <button
+            type="button"
+            className="data-source-mini data-source-mini--action"
+            title="切换数据源"
+            onClick={() => { setSettingsJumpTo('source'); setView('settings') }}
+          >
             <span className={'status-dot ' + (settings.dataSource === 'notion' ? 'status-dot--ready' : '')} />
             <span>{settings.dataSource === 'notion' ? 'Notion 远程数据' : '本地数据'}</span>
             <span className="data-source-divider">·</span>
             <span>{settings.dataSource === 'notion' ? remoteStatusText : '可按需同步 Notion'}</span>
-          </div>
+            <Settings2 size={13} />
+          </button>
         </div>
       </aside>
 
@@ -680,7 +736,27 @@ function App() {
             <section className="calendar-toolbar">
               <div className="month-switcher">
                 <button className="plain-icon-button" aria-label="上个月" onClick={() => moveMonth(-1)}><ChevronLeft size={18} /></button>
-                <h2>{monthTitle}</h2>
+                <div className="month-title-wrap">
+                  <button type="button" className="month-title-button" aria-expanded={monthPickerOpen} aria-haspopup="dialog" onClick={() => setMonthPickerOpen((open) => !open)}>
+                    <h2>{monthTitle}</h2>
+                    <ChevronDown size={14} />
+                  </button>
+                  {monthPickerOpen && (
+                    <div className="month-picker" role="dialog" aria-label="选择年月">
+                      <div className="month-picker-year">
+                        <button type="button" className="plain-icon-button" aria-label="上一年" onClick={() => setCurrentMonth((month) => new Date(month.getFullYear() - 1, month.getMonth(), 1))}><ChevronLeft size={15} /></button>
+                        <strong>{currentMonth.getFullYear()} 年</strong>
+                        <button type="button" className="plain-icon-button" aria-label="下一年" onClick={() => setCurrentMonth((month) => new Date(month.getFullYear() + 1, month.getMonth(), 1))}><ChevronRight size={15} /></button>
+                      </div>
+                      <div className="month-picker-grid">
+                        {Array.from({ length: 12 }, (_, index) => {
+                          const active = currentMonth.getMonth() === index
+                          return <button type="button" key={index} className={active ? 'month-picker-item active' : 'month-picker-item'} onClick={() => { setCurrentMonth(new Date(currentMonth.getFullYear(), index, 1)); setMonthPickerOpen(false) }}>{index + 1} 月</button>
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
                 <button className="plain-icon-button" aria-label="下个月" onClick={() => moveMonth(1)}><ChevronRight size={18} /></button>
               </div>
               <div className="calendar-toolbar-actions">
@@ -691,7 +767,7 @@ function App() {
                     aria-label="刷新远程数据"
                     title="重新读取 Notion 数据"
                     disabled={remoteDataState === 'loading'}
-                    onClick={() => setRemoteReloadToken((token) => token + 1)}
+                    onClick={() => { loadedMonthsRef.current.clear(); setRemoteReloadToken((token) => token + 1) }}
                   >
                     <RefreshCw size={17} className={remoteDataState === 'loading' ? 'spin' : ''} />
                   </button>
@@ -702,87 +778,74 @@ function App() {
             </section>
 
             <section className="overview-grid">
-              <div className="calendar-card card-surface">
-                <div className="calendar-card-header">
-                  <div><span className="card-kicker">时间轴</span><p className="card-subtitle">在日历里看见正在发生的事</p></div>
-                  <div className="calendar-legend"><span><i className="legend-line legend-line--solid" />有记录</span><span><i className="legend-line legend-line--dotted" />今天</span></div>
-                </div>
-                <div className="calendar-grid calendar-grid--head">
-                  {WEEKDAYS.map((day, index) => <div key={day} className={index > 4 ? 'weekday weekend' : 'weekday'}>{day}</div>)}
-                </div>
-                <div className="calendar-grid calendar-grid--body">
-                  {calendarCells.map((cell) => {
-                    const dayEntries = entries.filter((entry) => entry.date === cell.dateKey)
-                    const dayTags = Array.from(new Set(dayEntries.flatMap((entry) => entry.tagIds))).map(tagById).filter((tag): tag is Tag => Boolean(tag))
-                    const isToday = cell.dateKey === today
-                    const isSelected = cell.dateKey === selectedDate && drawerOpen
-                    return (
-                      <button type="button" key={cell.dateKey} className={`calendar-day ${cell.isCurrentMonth ? '' : 'calendar-day--outside'} ${isToday ? 'calendar-day--today' : ''} ${isSelected ? 'calendar-day--selected' : ''}`} onClick={() => openDate(cell.dateKey)}>
-                        <div className="day-number-row"><span className="day-number">{cell.date.getDate()}</span>{dayEntries.length > 0 && <span className="entry-count">{dayEntries.length}</span>}</div>
-                        <div className="day-tags">{dayTags.map((tag) => <span key={tag.id} className={`calendar-tag calendar-tag--${tag.color}`}>{tag.name}</span>)}</div>
-                        {dayEntries.some((entry) => entry.attachments.length > 0) && <span className="attachment-indicator"><FileImage size={12} /></span>}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-
-              <aside className="month-insight">
-                <div className="insight-card insight-card--highlight">
-                  <div className="insight-topline"><Sparkles size={15} /><span>本月概览</span><MoreHorizontal size={17} /></div>
-                  <div className="insight-number">{currentMonthEntries.length}<span>条记录</span></div>
-                  <p>每一个小小的标记，都在帮你找回生活的脉络。</p>
-                  <div className="progress-track"><span style={{ width: `${Math.min(100, currentMonthEntries.length * 12 + 8)}%` }} /></div>
-                  <div className="progress-caption"><span>记录节奏</span><strong>{isCurrentMonthToday ? '进行中' : '已归档'}</strong></div>
-                </div>
-                <div className="insight-card">
-                  <div className="insight-topline"><Layers3 size={15} /><span>最近更新</span><button className="card-link" onClick={() => currentMonthEntries[0] && openDate(currentMonthEntries[0].date)}>查看全部 <ArrowRight size={13} /></button></div>
-                  <div className="recent-list">
-                    {currentMonthEntries.slice(0, 3).map((entry) => <button key={entry.id} className="recent-item" onClick={() => openDate(entry.date)}><span className="recent-date">{fromDateKey(entry.date).getDate()}</span><span className="recent-copy"><strong>{entry.title || '未命名记录'}</strong><small>{formatDateKey(entry.date, { month: 'short', day: 'numeric' })}</small></span><ChevronRight size={14} /></button>)}
-                    {currentMonthEntries.length === 0 && <div className="empty-recent">这个月还没有记录，写下第一笔吧。</div>}
+              <div className="calendar-column">
+                <div className="calendar-card card-surface">
+                  <div className="calendar-card-header">
+                    <div><span className="card-kicker">时间轴</span><p className="card-subtitle">在日历里看见正在发生的事</p></div>
+                    <div className="calendar-legend"><span><i className="legend-line legend-line--solid" />有记录</span><span><i className="legend-line legend-line--dotted" />今天</span></div>
+                  </div>
+                  <div className="calendar-grid calendar-grid--head">
+                    {WEEKDAYS.map((day, index) => <div key={day} className={index > 4 ? 'weekday weekend' : 'weekday'}>{day}</div>)}
+                  </div>
+                  <div className="calendar-grid calendar-grid--body">
+                    {calendarCells.map((cell) => {
+                      const dayEntries = entries.filter((entry) => entry.date === cell.dateKey)
+                      const dayTags = Array.from(new Set(dayEntries.flatMap((entry) => entry.tagIds))).map(tagById).filter((tag): tag is Tag => Boolean(tag))
+                      const dayMood = dayEntries.find((entry) => entry.mood)?.mood
+                      const isToday = cell.dateKey === today
+                      const isSelected = cell.dateKey === selectedDate
+                      return (
+                        <button type="button" key={cell.dateKey} className={`calendar-day ${cell.isCurrentMonth ? '' : 'calendar-day--outside'} ${isToday ? 'calendar-day--today' : ''} ${isSelected ? 'calendar-day--selected' : ''} ${dayEntries.length > 0 ? 'calendar-day--has-entry' : ''}`} onClick={() => openDate(cell.dateKey)}>
+                          <div className="day-number-row"><span className="day-number">{cell.date.getDate()}</span>{dayMood && <span className="day-mood" title="当日心情">{dayMood}</span>}{dayEntries.length > 0 && <span className="entry-count">{dayEntries.length}</span>}</div>
+                          <div className="day-tags">{dayTags.map((tag) => <span key={tag.id} className={`calendar-tag calendar-tag--${tag.color}`}>{tag.name}</span>)}</div>
+                          {dayEntries.some((entry) => entry.attachments.length > 0) && <span className="attachment-indicator"><FileImage size={12} /></span>}
+                        </button>
+                      )
+                    })}
                   </div>
                 </div>
-                <div className="insight-card insight-card--tip"><div className="tip-icon"><Command size={16} /></div><div><strong>一个小提示</strong><p>按下快捷键，随时记下脑海里闪过的念头。</p></div></div>
+              </div>
+              <aside className="entry-panel">
+                <form className="editor-form" onSubmit={handleSaveEntry}>
+                  <div className="drawer-header"><div><span className="eyebrow">日期记录</span><h2>{formatDateKey(selectedDate)}</h2></div></div>
+                  <div className="drawer-scroll">
+                    <label className="field-label" htmlFor="entry-title">标题</label>
+                    <input id="entry-title" className="title-input" placeholder="今天发生了什么？" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
+                    <label className="field-label" htmlFor="entry-content">内容</label>
+                    <textarea id="entry-content" className="content-textarea" placeholder="写下细节、想法或下一步行动……" value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} rows={7} />
+                    <div className="field-label field-label--row"><span>今日心情</span>{draft.mood && <button type="button" className="text-button" onClick={() => setDraft({ ...draft, mood: undefined })}>清除</button>}</div>
+                    <div className="mood-picker">
+                      {MOOD_OPTIONS.map((mood) => (
+                        <button type="button" key={mood} className={`mood-choice ${draft.mood === mood ? 'mood-choice--active' : ''}`} aria-label={`心情 ${mood}`} aria-pressed={draft.mood === mood} onClick={() => setDraft({ ...draft, mood: draft.mood === mood ? undefined : mood })}>{mood}</button>
+                      ))}
+                    </div>
+                    <div className="field-label field-label--row"><span>快捷标签</span>{tagManageMode
+                      ? <button type="button" className="text-button" onClick={() => setTagManageMode(false)}>完成</button>
+                      : <button type="button" className="text-button" onClick={() => setTagManageMode(true)}>管理</button>}</div>
+                    <div className="tag-picker">{tags.filter((tag) => !tag.retired).map((tag) => tagManageMode
+                      ? <span key={tag.id} className={`tag-choice tag-choice--${tag.color} tag-choice--managed`}><span className="tag-dot" />{tag.name}<button type="button" className="tag-retire-button" aria-label={`停用 ${tag.name}`} title="停用后不再提供选择，已有记录保持不变" onClick={() => retireTag(tag.id)}><X size={12} /></button></span>
+                      : <button type="button" key={tag.id} className={`tag-choice tag-choice--${tag.color} ${draft.tagIds.includes(tag.id) ? 'tag-choice--active' : ''}`} onClick={() => toggleDraftTag(tag.id)}><span className="tag-dot" />{tag.name}{draft.tagIds.includes(tag.id) && <Check size={13} />}</button>)}</div>
+                    {tagManageMode && <div className="field-hint tag-manage-hint">停用只影响后续选择，不会修改已有记录或远端内容。</div>}
+                    <div className="inline-add-tag"><input aria-label="新标签名称" placeholder="添加新标签" value={newTagName} onChange={(event) => setNewTagName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); handleAddTagFromDrawer() } }} /><button type="button" aria-label="添加标签" onClick={handleAddTagFromDrawer}><Plus size={15} /></button></div>
+                    <div className="field-label field-label--row"><span>附件</span><span className="field-hint">图片或文档，单个 ≤ 5 MB</span></div>
+                    <label className="upload-zone"><Upload size={18} /><span><strong>拖拽或选择文件</strong><small>支持图片、TXT、Markdown、PDF</small></span><input type="file" multiple accept="image/*,.txt,.md,.pdf" onChange={handleFiles} /></label>
+                    {draft.attachments.length > 0 && <div className="attachment-list">{draft.attachments.map((attachment) => <AttachmentItem key={attachment.id} attachment={attachment} onRemove={() => setDraft((previous) => ({ ...previous, attachments: previous.attachments.filter((item) => item.id !== attachment.id) }))} />)}</div>}
+                  </div>
+                  <div className="drawer-footer">{entries.some((entry) => entry.id === draft.id) && (confirmingDelete
+                    ? <div className="delete-confirm">
+                      <span>删除这条记录？</span>
+                      <button type="button" className="danger-button" disabled={remoteDataState === 'deleting'} onClick={() => { void handleDeleteEntry() }}>确认删除</button>
+                      <button type="button" className="text-button" onClick={() => setConfirmingDelete(false)}>取消</button>
+                    </div>
+                    : <button type="button" className="danger-button" onClick={() => setConfirmingDelete(true)}><Trash2 size={15} />删除</button>)}<div className="drawer-footer-actions"><button type="submit" className="primary-button" disabled={remoteDataState === 'saving'}><Save size={15} />{settings.dataSource === 'notion' ? '保存到 Notion' : '保存记录'}</button></div></div>
+                </form>
               </aside>
             </section>
           </>
         ) : (
-          <SettingsView settings={settings} settingsSection={settingsSection} setSettingsSection={setSettingsSection} onChangeSettings={setSettings} entries={entries} onChangeEntries={setEntries} tags={tags} onChangeTags={setTags} onAddTag={(name) => addTag(name)} onDeleteTag={retireTag} onRestoreTag={restoreTag} shortcutState={shortcutState} onNotice={setNotice} onReloadRemote={() => setRemoteReloadToken((token) => token + 1)} />
+          <SettingsView settings={settings} settingsSection={settingsSection} setSettingsSection={setSettingsSection} onChangeSettings={setSettings} entries={entries} onChangeEntries={setEntries} tags={tags} onChangeTags={setTags} onAddTag={(name) => addTag(name)} onDeleteTag={retireTag} onRestoreTag={restoreTag} shortcutState={shortcutState} onNotice={setNotice} onReloadRemote={() => { loadedMonthsRef.current.clear(); setRemoteReloadToken((token) => token + 1) }} jumpTo={settingsJumpTo} onJumpHandled={() => setSettingsJumpTo(null)} />
         )}
       </main>
-
-      {view === 'calendar' && <>
-        <div className={`drawer-backdrop ${drawerOpen ? 'drawer-backdrop--visible' : ''}`} onClick={() => setDrawerOpen(false)} />
-        <aside className={`editor-drawer ${drawerOpen ? 'editor-drawer--open' : ''}`} aria-hidden={!drawerOpen}>
-          <form className="editor-form" onSubmit={handleSaveEntry}>
-            <div className="drawer-header"><div><span className="eyebrow">日期记录</span><h2>{formatDateKey(selectedDate)}</h2></div><button type="button" className="icon-button" aria-label="关闭抽屉" onClick={() => setDrawerOpen(false)}><PanelRightClose size={18} /></button></div>
-            <div className="drawer-scroll">
-              <label className="field-label" htmlFor="entry-title">标题</label>
-              <input id="entry-title" className="title-input" placeholder="今天发生了什么？" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
-              <label className="field-label" htmlFor="entry-content">内容</label>
-              <textarea id="entry-content" className="content-textarea" placeholder="写下细节、想法或下一步行动……" value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} rows={7} />
-              <div className="field-label field-label--row"><span>快捷标签</span>{tagManageMode
-                ? <button type="button" className="text-button" onClick={() => setTagManageMode(false)}>完成</button>
-                : <button type="button" className="text-button" onClick={() => setTagManageMode(true)}>管理</button>}</div>
-              <div className="tag-picker">{tags.filter((tag) => !tag.retired).map((tag) => tagManageMode
-                ? <span key={tag.id} className={`tag-choice tag-choice--${tag.color} tag-choice--managed`}><span className="tag-dot" />{tag.name}<button type="button" className="tag-retire-button" aria-label={`停用 ${tag.name}`} title="停用后不再提供选择，已有记录保持不变" onClick={() => retireTag(tag.id)}><X size={12} /></button></span>
-                : <button type="button" key={tag.id} className={`tag-choice tag-choice--${tag.color} ${draft.tagIds.includes(tag.id) ? 'tag-choice--active' : ''}`} onClick={() => toggleDraftTag(tag.id)}><span className="tag-dot" />{tag.name}{draft.tagIds.includes(tag.id) && <Check size={13} />}</button>)}</div>
-              {tagManageMode && <div className="field-hint tag-manage-hint">停用只影响后续选择，不会修改已有记录或远端内容。</div>}
-              <div className="inline-add-tag"><input aria-label="新标签名称" placeholder="添加新标签" value={newTagName} onChange={(event) => setNewTagName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); handleAddTagFromDrawer() } }} /><button type="button" aria-label="添加标签" onClick={handleAddTagFromDrawer}><Plus size={15} /></button></div>
-              <div className="field-label field-label--row"><span>附件</span><span className="field-hint">图片或文档，单个 ≤ 5 MB</span></div>
-              <label className="upload-zone"><Upload size={18} /><span><strong>拖拽或选择文件</strong><small>支持图片、TXT、Markdown、PDF</small></span><input type="file" multiple accept="image/*,.txt,.md,.pdf" onChange={handleFiles} /></label>
-              {draft.attachments.length > 0 && <div className="attachment-list">{draft.attachments.map((attachment) => <AttachmentItem key={attachment.id} attachment={attachment} onRemove={() => setDraft((previous) => ({ ...previous, attachments: previous.attachments.filter((item) => item.id !== attachment.id) }))} />)}</div>}
-            </div>
-            <div className="drawer-footer">{entries.some((entry) => entry.id === draft.id) && (confirmingDelete
-              ? <div className="delete-confirm">
-                <span>删除这条记录？</span>
-                <button type="button" className="danger-button" disabled={remoteDataState === 'deleting'} onClick={() => { void handleDeleteEntry() }}>确认删除</button>
-                <button type="button" className="text-button" onClick={() => setConfirmingDelete(false)}>取消</button>
-              </div>
-              : <button type="button" className="danger-button" onClick={() => setConfirmingDelete(true)}><Trash2 size={15} />删除</button>)}<div className="drawer-footer-actions"><button type="button" className="secondary-button" onClick={() => setDrawerOpen(false)}>取消</button><button type="submit" className="primary-button" disabled={remoteDataState === 'saving'}><Save size={15} />{settings.dataSource === 'notion' ? '保存到 Notion' : '保存记录'}</button></div></div>
-          </form>
-        </aside>
-      </>}
 
       {notice && <div className="toast" role="status"><Check size={15} />{notice}</div>}
     </div>
@@ -810,9 +873,11 @@ type SettingsViewProps = {
   shortcutState: 'ready' | 'browser' | 'error'
   onNotice: (message: string) => void
   onReloadRemote: () => void
+  jumpTo: SettingsSection | null
+  onJumpHandled: () => void
 }
 
-function SettingsView({ settings, settingsSection, setSettingsSection, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onAddTag, onDeleteTag, onRestoreTag, shortcutState, onNotice, onReloadRemote }: SettingsViewProps) {
+function SettingsView({ settings, settingsSection, setSettingsSection, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onAddTag, onDeleteTag, onRestoreTag, shortcutState, onNotice, onReloadRemote, jumpTo, onJumpHandled }: SettingsViewProps) {
   const [newTag, setNewTag] = useState('')
   const settingsScrollRef = useRef<HTMLElement | null>(null)
   const suppressSpyRef = useRef(false)
@@ -823,6 +888,13 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
     { id: 'tags', label: '标签管理', description: '整理你的分类', icon: TagIcon },
   ]
   const update = (partial: Partial<AppSettings>) => onChangeSettings((previous) => ({ ...previous, ...partial }))
+
+  // 侧栏等外部入口指定跳转到某个设置分区
+  useEffect(() => {
+    if (!jumpTo) return
+    scrollToSection(jumpTo)
+    onJumpHandled()
+  }, [jumpTo])
 
   // 所有设置共享同一个滚动容器：导航点击平滑滚动到对应分区，
   // 滚动时反向高亮当前分区，避免内容长短不同导致滚动条出现/消失引起布局偏移。
@@ -928,7 +1000,6 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
           <SettingsTitle icon={<TagIcon size={18} />} eyebrow="标签管理" title="让标签替你整理生活的纹理" description="快捷标签会显示在日历格子和记录抽屉里；停用只是不再提供选择，已有记录保持不变。" />
           <div className="tag-manager-card"><div className="tag-manager-header"><div><strong>我的标签</strong><span>{tags.filter((tag) => !tag.retired).length} 个可选标签</span></div><form className="tag-add-form" onSubmit={submitTag}><input aria-label="标签名称" placeholder="输入新标签" value={newTag} onChange={(event) => setNewTag(event.target.value)} /><button type="submit" aria-label="添加标签"><Plus size={16} /></button></form></div><div className="managed-tags">{tags.filter((tag) => !tag.retired).map((tag) => <div className="managed-tag" key={tag.id}><span className={`tag-dot tag-dot--${tag.color}`} /><span>{tag.name}</span><span className="managed-tag-count">{entries.filter((entry) => entry.tagIds.includes(tag.id)).length} 条记录</span><button className="plain-icon-button" aria-label={`停用 ${tag.name}`} title="停用后不再提供选择，已有记录保持不变" onClick={() => onDeleteTag(tag.id)}><Trash2 size={14} /></button></div>)}</div></div>
           {tags.some((tag) => tag.retired) && <div className="tag-manager-card tag-manager-card--retired"><div className="tag-manager-header"><div><strong>已停用标签</strong><span>仍保留在历史记录中，可随时恢复选择</span></div></div><div className="managed-tags managed-tags--retired">{tags.filter((tag) => tag.retired).map((tag) => <div className="managed-tag" key={tag.id}><span className={`tag-dot tag-dot--${tag.color}`} /><span>{tag.name}</span><span className="managed-tag-count">{entries.filter((entry) => entry.tagIds.includes(tag.id)).length} 条记录</span><button className="text-button" onClick={() => onRestoreTag(tag.id)}>恢复</button></div>)}</div></div>}
-          <div className="info-banner info-banner--warm"><Hash size={16} /><span>小建议：保持标签在 3–8 个之间，日历会更清晰，也更容易回顾。</span></div>
         </div>
       </section>
     </div>
@@ -1099,9 +1170,9 @@ function SystemSettings({ settings, onChangeSettings, shortcutState, onNotice }:
         </div>
       </div>
     </div>
-    <div className="shortcut-preview"><div className="shortcut-preview-icon"><Zap size={18} /></div><div><strong>快速记录的节奏</strong><p>按下快捷键后，CalendarMark 会显示主窗口；再点击某一天即可打开右侧记录抽屉。</p></div><kbd>{displayShortcut(settings.shortcut)}</kbd></div>
   </>
 }
+
 
 function DataSourceSettings({ settings, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onNotice, onReloadRemote }: { settings: AppSettings; onChangeSettings: Dispatch<SetStateAction<AppSettings>>; entries: CalendarEntry[]; onChangeEntries: (entries: CalendarEntry[]) => void; tags: Tag[]; onChangeTags: (tags: Tag[]) => void; onNotice: (message: string) => void; onReloadRemote: () => void }) {
   const selectedSource = DATA_SOURCE_DEFINITIONS.find((source) => source.id === settings.dataSource) ?? DATA_SOURCE_DEFINITIONS[0]
@@ -1316,6 +1387,15 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
       <div className="source-fields">
         <label className="field-label" htmlFor="notion-token"><span>Integration Token</span><span className="field-hint"><KeyRound size={12} />仅保存在本机</span></label>
         <input id="notion-token" className="settings-input" type="password" placeholder="secret_… 或 ntn_…" value={settings.notionToken} onChange={(event) => { update({ notionToken: event.target.value }); setConnection(null); setDiscoveredDatasets([]) }} />
+        <button
+          type="button"
+          className="text-button notion-token-help"
+          onClick={() => {
+            void openInExternalBrowser('https://www.notion.so/profile/integrations').then((ok) => {
+              if (!ok) window.open('https://www.notion.so/profile/integrations', '_blank', 'noopener')
+            })
+          }}
+        ><ExternalLink size={13} />获取 Token</button>
       </div>
       <div className="notion-dataset-manager">
         <div className="notion-dataset-header">
@@ -1373,7 +1453,6 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
       {connection && <div className="notion-connection-panel"><div className="notion-connection-heading"><span><Check size={14} />已连接到 {connection.databaseTitle}</span><small>{connection.dataSourceName}</small></div><div className="notion-mapping-grid"><span>标题：{mapping?.titleProperty ?? '未识别'}</span><span>日期：{mapping?.dateProperty ?? '未识别'}</span><span>正文：{mapping?.contentProperty ?? '未配置'}</span><span>标签：{mapping?.tagsProperty ?? '未配置'}</span><span>附件：{mapping?.filesProperty ?? '未配置'}</span></div>{mapping && !mapping.ready && <div className="notion-mapping-error">{mapping.message}</div>}<div className="notion-schema-list">{connection.properties.map((property) => <span key={`${property.id}-${property.name}`}><b>{property.name}</b><small>{property.propertyType}</small></span>)}</div></div>}
       <div className="source-card-footer source-card-footer--notion"><span><RefreshCw size={15} className={busy !== 'idle' ? 'spin' : ''} />{busyLabel}</span><div className="notion-actions"><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleCheckConnection() }}><RefreshCw size={15} />检查连接</button><button type="button" className="secondary-button" disabled={busy !== 'idle' || !isConfigured} onClick={() => onReloadRemote?.()}><RefreshCw size={15} />重新读取</button></div></div>
     </div>
-    <NotionSetupGuide />
     <div className="info-banner"><Sparkles size={16} /><span><strong>远程直连规则：</strong>CalendarMark 启动或切换到 Notion 时自动读取远端数据；保存和删除记录会直接写入 Notion，不会把记录持久化到本机数据文件。Notion 侧有外部改动时，可点击“重新读取”刷新当前数据集。</span></div>
   </>
 }
@@ -1414,6 +1493,7 @@ function mergeNotionEntries(records: NotionEntryRecord[], currentEntries: Calend
       title: record.title,
       content: record.content,
       tagIds,
+      mood: record.mood,
       attachments,
       updatedAt: record.updatedAt || syncedAt,
       remote: { provider: 'notion', id: record.remoteId, dataSourceId: record.dataSourceId, lastSyncedAt: syncedAt },
@@ -1460,18 +1540,6 @@ function applyPushResultToEntry(entry: CalendarEntry, result: NotionPushResult):
 function formatSyncNotice(message: string, warnings: string[]): string {
   if (!warnings.length) return message
   return `${message}；${warnings.slice(0, 2).join('；')}${warnings.length > 2 ? `（另有 ${warnings.length - 2} 条警告）` : ''}`
-}
-
-function NotionSetupGuide() {
-  return <section className="notion-guide" aria-labelledby="notion-guide-title">
-    <div className="notion-guide-header"><div><span className="eyebrow">连接引导</span><h3 id="notion-guide-title">3 步准备好 Notion 数据源</h3><p>CalendarMark 会根据 Token 自动发现已授权的数据集，不需要手工填写 ID。</p></div><a className="guide-link" href="https://developers.notion.com/guides/get-started/quick-start" target="_blank" rel="noreferrer">官方文档 <ExternalLink size={13} /></a></div>
-    <div className="notion-guide-steps">
-      <div className="notion-guide-step"><span className="notion-guide-number">1</span><div><strong>创建 Internal connection</strong><p>打开 Notion Integrations，在 Build 中创建 Internal connection，然后进入 Configuration 复制 Installation access token。</p><a className="guide-link guide-link--inline" href="https://www.notion.so/my-integrations" target="_blank" rel="noreferrer">打开 Notion Integrations <ExternalLink size={12} /></a></div></div>
-      <div className="notion-guide-step"><span className="notion-guide-number">2</span><div><strong>把目标数据库分享给连接</strong><p>打开目标数据库右上角的 <b>•••</b>，选择 Add connections，搜索刚创建的连接并确认。没有这一步，API 无法访问数据库。</p></div></div>
-      <div className="notion-guide-step"><span className="notion-guide-number">3</span><div><strong>发现并添加数据集</strong><p>回到 CalendarMark，填写 Token 后点击“发现数据集”，在结果中点击“添加数据集”，再选择当前同步目标。</p><code className="notion-url-example">Token → 发现数据集 → 添加数据集</code></div></div>
-    </div>
-    <div className="notion-guide-note"><KeyRound size={14} /><span>不要把 Token 发给别人、放进截图或提交到 Git。CalendarMark 会从 Rust 侧直接请求 Notion API，不经过 CalendarMark 自有服务；“添加数据集”只保存本机的同步目标，不会修改或删除 Notion 内容。</span></div>
-  </section>
 }
 
 type LocalSourceSettingsProps = {
