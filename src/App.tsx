@@ -60,7 +60,7 @@ import {
   saveTags,
 } from './storage'
 import {
-  isTauriRuntime,
+  isDesktopTauriRuntime,
   listenForSettingsOpen,
   registerGlobalShortcut,
   showMainWindow,
@@ -159,7 +159,7 @@ function App() {
       void showMainWindow()
     }).then((result) => {
       if (cancelled) return
-      setShortcutState(!isTauriRuntime() ? 'browser' : result.ok ? 'ready' : 'error')
+      setShortcutState(!isDesktopTauriRuntime() ? 'browser' : result.ok ? 'ready' : 'error')
     })
     return () => {
       cancelled = true

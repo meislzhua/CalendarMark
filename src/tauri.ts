@@ -12,18 +12,19 @@ declare global {
 }
 
 export const isTauriRuntime = (): boolean => Boolean(window.__TAURI_INTERNALS__)
+export const isDesktopTauriRuntime = (): boolean => isTauriRuntime() && !/Android|iPhone|iPad/i.test(navigator.userAgent)
 
 let registeredShortcut: string | null = null
 
 export async function showMainWindow(): Promise<void> {
-  if (!isTauriRuntime()) return
+  if (!isDesktopTauriRuntime()) return
   const appWindow = getCurrentWindow()
   await appWindow.show()
   await appWindow.setFocus()
 }
 
 export async function toggleMainWindow(): Promise<void> {
-  if (!isTauriRuntime()) return
+  if (!isDesktopTauriRuntime()) return
   const appWindow = getCurrentWindow()
   if (await appWindow.isVisible()) {
     await appWindow.hide()
@@ -36,7 +37,7 @@ export async function registerGlobalShortcut(
   shortcut: string,
   onPressed: () => void,
 ): Promise<{ ok: boolean; error?: string }> {
-  if (!isTauriRuntime()) return { ok: true }
+  if (!isDesktopTauriRuntime()) return { ok: true }
 
   try {
     if (registeredShortcut && registeredShortcut !== shortcut) {
@@ -58,7 +59,7 @@ export async function registerGlobalShortcut(
 export async function listenForSettingsOpen(
   onOpen: () => void,
 ): Promise<() => void> {
-  if (!isTauriRuntime()) return () => undefined
+  if (!isDesktopTauriRuntime()) return () => undefined
 
   try {
     return await listen('calendar-mark:open-settings', onOpen)
