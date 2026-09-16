@@ -42,7 +42,7 @@ export type CalendarEntry = {
   remote?: EntryRemoteRef
 }
 
-export const MOOD_OPTIONS = ['😀', '😊', '😌', '🤩', '😎', '🤔', '😕', '😢', '😤', '😩', '😴', '🤒'] as const
+export const MOOD_OPTIONS = ['😊', '😐', '😢', '😴', '😑', '😤', '🤩'] as const
 
 export type ThemeMode = 'light' | 'dark' | 'auto'
 

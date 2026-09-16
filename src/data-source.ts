@@ -25,7 +25,7 @@ export type TagDateSummary = {
 export interface CalendarDataSource {
   readonly kind: 'local' | 'notion'
   /** 加载指定月份（含前后跨月占位）的记录 */
-  loadMonth(year: number, month: number): Promise<MonthLoadResult>
+  loadMonth(year: number, month: number, knownTags: Tag[]): Promise<MonthLoadResult>
   /** 查询带指定标签的记录摘要（跨月份），用于快捷入口 */
   queryTagDates(tagName: string): Promise<TagDateSummary[]>
   /** 保存（创建或更新）一条记录，返回带远端引用的结果 */
@@ -120,9 +120,10 @@ export function mergeNotionRecords(
 export function createLocalDataSource(): CalendarDataSource {
   return {
     kind: 'local',
-    async loadMonth(year, month) {
+    async loadMonth(year, month, knownTags) {
       void year
       void month
+      void knownTags
       return { entries: [], newTags: [] }
     },
     async queryTagDates(tagName) {
@@ -157,14 +158,15 @@ export function createNotionDataSource(
 
   return {
     kind: 'notion',
-    async loadMonth(year, month) {
+    async loadMonth(year, month, knownTags) {
       const { token, databaseId, dataSourceId } = await target()
       const { start, end } = monthRange(year, month)
       const result = await pullNotionEntries(token, databaseId, dataSourceId || undefined, {
         dateStart: start,
         dateEnd: end,
       })
-      return mergeNotionRecords(result.entries, [], [])
+      // 复用已知标签的 id：否则每次加载生成新 id，旧标签列表与新记录脱节导致标签“消失”
+      return mergeNotionRecords(result.entries, [], knownTags)
     },
     async queryTagDates(tagName) {
       const { token, databaseId, dataSourceId } = await target()

@@ -243,6 +243,8 @@ function App() {
   const notionTargetKey = `${notionTarget.databaseId}:${notionTarget.dataSourceId}`
   const settingsRef = useRef(settings)
   settingsRef.current = settings
+  const tagsRef = useRef(tags)
+  tagsRef.current = tags
 
   // 统一数据源接口：UI 不感知本地/远程差异，Notion 实现负责筛选、分页与远端引用
   const dataSource = useMemo<CalendarDataSource>(() => (
@@ -307,7 +309,7 @@ function App() {
     setRemoteDataState('loading')
     const timer = window.setTimeout(() => {
       if (cancelled) return
-      void dataSource.loadMonth(currentMonth.getFullYear(), currentMonth.getMonth())
+      void dataSource.loadMonth(currentMonth.getFullYear(), currentMonth.getMonth(), tagsRef.current)
         .then((result) => {
           if (cancelled) return
           loadedMonthsRef.current.add(monthKey)
@@ -678,7 +680,7 @@ function App() {
             <button key={tag.id} className="quick-link" onClick={() => setTagDatesFor(tagDatesFor?.id === tag.id ? null : tag)} aria-expanded={tagDatesFor?.id === tag.id}>
               <span className={`tag-dot tag-dot--${tag.color}`} />
               <span>{tag.name}</span>
-              <span className="quick-link-count">{entries.filter((entry) => entry.tagIds.includes(tag.id)).length}</span>
+              {settings.dataSource === 'local' && <span className="quick-link-count">{entries.filter((entry) => entry.tagIds.includes(tag.id)).length}</span>}
             </button>
           ))}
           <button className="quick-link quick-link--muted" onClick={() => { setSettingsJumpTo('tags'); setView('settings') }}>
@@ -812,7 +814,7 @@ function App() {
                     <label className="field-label" htmlFor="entry-title">标题</label>
                     <input id="entry-title" className="title-input" placeholder="今天发生了什么？" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
                     <label className="field-label" htmlFor="entry-content">内容</label>
-                    <textarea id="entry-content" className="content-textarea" placeholder="写下细节、想法或下一步行动……" value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} rows={7} />
+                    <textarea id="entry-content" className="content-textarea" placeholder="写下细节、想法或下一步行动……" value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} rows={3} />
                     <div className="field-label field-label--row"><span>今日心情</span>{draft.mood && <button type="button" className="text-button" onClick={() => setDraft({ ...draft, mood: undefined })}>清除</button>}</div>
                     <div className="mood-picker">
                       {MOOD_OPTIONS.map((mood) => (
@@ -822,9 +824,9 @@ function App() {
                     <div className="field-label field-label--row"><span>快捷标签</span>{tagManageMode
                       ? <button type="button" className="text-button" onClick={() => setTagManageMode(false)}>完成</button>
                       : <button type="button" className="text-button" onClick={() => setTagManageMode(true)}>管理</button>}</div>
-                    <div className="tag-picker">{tags.filter((tag) => !tag.retired).map((tag) => tagManageMode
+                    <div className="tag-picker">{tags.filter((tag) => !tag.retired || draft.tagIds.includes(tag.id)).map((tag) => tagManageMode
                       ? <span key={tag.id} className={`tag-choice tag-choice--${tag.color} tag-choice--managed`}><span className="tag-dot" />{tag.name}<button type="button" className="tag-retire-button" aria-label={`停用 ${tag.name}`} title="停用后不再提供选择，已有记录保持不变" onClick={() => retireTag(tag.id)}><X size={12} /></button></span>
-                      : <button type="button" key={tag.id} className={`tag-choice tag-choice--${tag.color} ${draft.tagIds.includes(tag.id) ? 'tag-choice--active' : ''}`} onClick={() => toggleDraftTag(tag.id)}><span className="tag-dot" />{tag.name}{draft.tagIds.includes(tag.id) && <Check size={13} />}</button>)}</div>
+                      : <button type="button" key={tag.id} className={`tag-choice tag-choice--${tag.color} ${draft.tagIds.includes(tag.id) ? 'tag-choice--active' : ''} ${tag.retired ? 'tag-choice--retired' : ''}`} onClick={() => toggleDraftTag(tag.id)}><span className="tag-dot" />{tag.name}{draft.tagIds.includes(tag.id) && <Check size={13} />}</button>)}</div>
                     {tagManageMode && <div className="field-hint tag-manage-hint">停用只影响后续选择，不会修改已有记录或远端内容。</div>}
                     <div className="inline-add-tag"><input aria-label="新标签名称" placeholder="添加新标签" value={newTagName} onChange={(event) => setNewTagName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); handleAddTagFromDrawer() } }} /><button type="button" aria-label="添加标签" onClick={handleAddTagFromDrawer}><Plus size={15} /></button></div>
                     <div className="field-label field-label--row"><span>附件</span><span className="field-hint">图片或文档，单个 ≤ 5 MB</span></div>
@@ -924,9 +926,10 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
     const container = settingsScrollRef.current
     if (!container) return undefined
 
-    // 恢复上次浏览的分区（首次挂载不需要动效）
+  // 恢复上次浏览的分区（首次挂载不需要动效）
     requestAnimationFrame(() => {
-      const initial = container.querySelector<HTMLElement>(`#settings-section-${settingsSection}`)
+      // 外部跳转（管理标签等）优先于上次浏览位置，避免异步恢复覆盖跳转目标
+      const initial = container.querySelector<HTMLElement>(`#settings-section-${jumpTo ?? settingsSection}`)
       if (!initial) return
       const scroller = findScrollContainer(initial)
       if (scroller) {
