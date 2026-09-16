@@ -98,6 +98,16 @@ import type {
 type View = 'calendar' | 'settings'
 type SettingsSection = 'source' | 'system' | 'interface' | 'tags'
 
+function findScrollContainer(el: HTMLElement): HTMLElement | null {
+  let node = el.parentElement
+  while (node && node !== document.documentElement) {
+    const overflowY = getComputedStyle(node).overflowY
+    if (/(auto|scroll)/.test(overflowY)) return node
+    node = node.parentElement
+  }
+  return null
+}
+
 type CalendarCell = {
   date: Date
   dateKey: string
@@ -805,6 +815,7 @@ type SettingsViewProps = {
 function SettingsView({ settings, settingsSection, setSettingsSection, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onAddTag, onDeleteTag, onRestoreTag, shortcutState, onNotice, onReloadRemote }: SettingsViewProps) {
   const [newTag, setNewTag] = useState('')
   const settingsScrollRef = useRef<HTMLElement | null>(null)
+  const suppressSpyRef = useRef(false)
   const sections: { id: SettingsSection; label: string; description: string; icon: typeof Database }[] = [
     { id: 'source', label: '数据源', description: '选择数据来源', icon: Database },
     { id: 'system', label: '系统', description: '启动与快捷键', icon: Power },
@@ -817,10 +828,24 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
   // 滚动时反向高亮当前分区，避免内容长短不同导致滚动条出现/消失引起布局偏移。
   function scrollToSection(id: SettingsSection, smooth = true) {
     setSettingsSection(id)
-    document.getElementById(`settings-section-${id}`)?.scrollIntoView({
+    const target = document.getElementById(`settings-section-${id}`)
+    if (!target) return
+    // 只滚动设置内容所在的实际滚动容器（窗口模式是 settings-content，
+    // 抽屉模式是 main-area）；scrollIntoView 会连带滚动 window，导致整页幽灵滚动条。
+    const scroller = findScrollContainer(target)
+    if (!scroller) return
+    const targetTop = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop
+    scroller.scrollTo({
+      top: Math.max(0, targetTop - 10),
       behavior: smooth ? 'smooth' : 'auto',
-      block: 'start',
     })
+    if (smooth) {
+      // 平滑滚动途中 observer 会路过中间分区，冻结高亮避免覆盖点击目标
+      suppressSpyRef.current = true
+      window.setTimeout(() => {
+        suppressSpyRef.current = false
+      }, 700)
+    }
   }
 
   useEffect(() => {
@@ -828,16 +853,33 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
     if (!container) return undefined
 
     // 恢复上次浏览的分区（首次挂载不需要动效）
-    const initial = container.querySelector<HTMLElement>(`#settings-section-${settingsSection}`)
-    initial?.scrollIntoView({ block: 'start' })
+    requestAnimationFrame(() => {
+      const initial = container.querySelector<HTMLElement>(`#settings-section-${settingsSection}`)
+      if (!initial) return
+      const scroller = findScrollContainer(initial)
+      if (scroller) {
+        scroller.scrollTop = Math.max(0, initial.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 10)
+      }
+    })
 
     const observer = new IntersectionObserver((observed) => {
+      if (suppressSpyRef.current) return
       const visible = observed
         .filter((entry) => entry.isIntersecting)
         .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0]
-      const id = (visible?.target as HTMLElement | undefined)?.dataset.section as SettingsSection | undefined
+      const target = visible?.target as HTMLElement | undefined
+      if (!target) return
+      // 滚动到底时最后一个分区往往进不了高亮带，强制激活最后一段
+      const scroller = findScrollContainer(target)
+      if (scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 8) {
+        const sections = scroller.querySelectorAll<HTMLElement>('.settings-section')
+        const last = sections[sections.length - 1]?.dataset.section as SettingsSection | undefined
+        if (last) setSettingsSection(last)
+        return
+      }
+      const id = target.dataset.section as SettingsSection | undefined
       if (id) setSettingsSection(id)
-    }, { root: container, rootMargin: '-12% 0px -55% 0px', threshold: [0.05, 0.25, 0.5, 0.75] })
+    }, { rootMargin: '-12% 0px -55% 0px', threshold: [0.05, 0.25, 0.5, 0.75] })
     container.querySelectorAll<HTMLElement>('.settings-section').forEach((node) => observer.observe(node))
     return () => observer.disconnect()
     // eslint-disable-next-line react-hooks/exhaustive-deps

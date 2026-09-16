@@ -92,6 +92,15 @@ textarea:focus-visible {
   background: var(--canvas);
 }
 
+/* 应用式布局：桌面窗口与抽屉模式都禁止页面级滚动，
+   滚轮只作用于内容自身的滚动容器，避免整页被滚没 */
+@media (min-width: 821px) {
+  html,
+  body {
+    overflow: hidden;
+  }
+}
+
 .sidebar {
   display: flex;
   width: 235px;
@@ -1376,6 +1385,7 @@ input::placeholder {
 }
 
 .settings-content {
+  position: relative;
   max-width: 690px;
   min-width: 0;
   /* 所有设置共享一个固定高度的滚动容器：
@@ -2863,7 +2873,15 @@ button.toggle-switch:disabled {
 
 [data-ui-mode='drawer'] .app-shell {
   flex-direction: column;
+  /* 高度固定为视口高，flex:1 的 main 才会被约束在屏内滚动，而不是把 shell 撑高 */
+  height: 100vh;
   min-height: 100vh;
+}
+
+/* 抽屉窗口可能窄于桌面断点，但同样禁止页面级滚动（主区域内部滚动） */
+html[data-ui-mode='drawer'],
+html[data-ui-mode='drawer'] body {
+  overflow: hidden;
 }
 
 [data-ui-mode='drawer'] .app-shell--slide-in {
@@ -2877,6 +2895,10 @@ button.toggle-switch:disabled {
 
 [data-ui-mode='drawer'] .sidebar {
   width: 100%;
+  /* 关键：覆盖基础样式的 min-height:100vh，否则顶栏占满整屏把内容挤出视口 */
+  min-height: 0;
+  height: auto;
+  flex: 0 0 auto;
   flex-direction: row;
   align-items: center;
   gap: 12px;
@@ -2898,13 +2920,24 @@ button.toggle-switch:disabled {
 
 [data-ui-mode='drawer'] .primary-nav {
   flex-direction: row;
+  margin-top: 0;
   gap: 6px;
 }
 
 [data-ui-mode='drawer'] .nav-item {
+  flex: 0 0 auto;
   min-height: 34px;
   padding: 0 11px;
   gap: 6px;
+}
+
+/* 窄窗口会同时命中移动断点（隐藏文字、压缩间距），这里恢复抽屉顶栏的横向标签形态 */
+[data-ui-mode='drawer'] .nav-item > span:first-of-type {
+  display: block;
+}
+
+[data-ui-mode='drawer'] .nav-item > svg {
+  margin: 0;
 }
 
 [data-ui-mode='drawer'] .nav-count {
@@ -2913,7 +2946,10 @@ button.toggle-switch:disabled {
 
 [data-ui-mode='drawer'] .main-area {
   width: 100%;
+  flex: 1 1 auto;
   min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 16px 14px 26px;
 }
 
@@ -2984,197 +3020,6 @@ button.toggle-switch:disabled {
 [data-ui-mode='drawer'] .ui-mode-options {
   grid-template-columns: 1fr;
 }
-
-/* --- 界面模式选择 --- */
-
-.ui-mode-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.ui-mode-option {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  padding: 13px 14px;
-  background: var(--surface);
-  color: var(--ink-muted);
-  cursor: pointer;
-  text-align: left;
-  transition: border-color .15s ease, box-shadow .15s ease;
-}
-
-.ui-mode-option svg {
-  color: var(--green);
-}
-
-.ui-mode-option > span {
-  display: grid;
-  flex: 1;
-  gap: 3px;
-}
-
-.ui-mode-option strong {
-  color: var(--ink);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.ui-mode-option small {
-  font-size: 10px;
-  line-height: 1.5;
-}
-
-.ui-mode-option--active {
-  border-color: var(--green);
-  box-shadow: inset 0 0 0 1px var(--green);
-}
-
-/* --- 抽屉模式（桌面端贴右侧窄窗口） --- */
-
-.drawer-drag-region {
-  display: flex;
-  height: 34px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  border-bottom: 1px solid var(--line);
-  padding: 0 6px 0 14px;
-  background: var(--surface);
-  color: var(--ink-faint);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .02em;
-  user-select: none;
-}
-
-[data-ui-mode='drawer'] .app-shell {
-  flex-direction: column;
-  min-height: 100vh;
-}
-
-[data-ui-mode='drawer'] .app-shell--slide-in {
-  animation: drawer-slide-in .3s cubic-bezier(.22, .9, .24, 1);
-}
-
-@keyframes drawer-slide-in {
-  from { opacity: .35; transform: translateX(48px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
-[data-ui-mode='drawer'] .sidebar {
-  width: 100%;
-  flex-direction: row;
-  align-items: center;
-  gap: 12px;
-  border-right: 0;
-  border-bottom: 1px solid var(--line);
-  padding: 9px 14px;
-}
-
-[data-ui-mode='drawer'] .brand-lockup > div:last-child {
-  display: none;
-}
-
-[data-ui-mode='drawer'] .sidebar-section-label,
-[data-ui-mode='drawer'] .quick-links,
-[data-ui-mode='drawer'] .shortcut-hint,
-[data-ui-mode='drawer'] .sidebar-footer {
-  display: none;
-}
-
-[data-ui-mode='drawer'] .primary-nav {
-  flex-direction: row;
-  gap: 6px;
-}
-
-[data-ui-mode='drawer'] .nav-item {
-  min-height: 34px;
-  padding: 0 11px;
-  gap: 6px;
-}
-
-[data-ui-mode='drawer'] .nav-count {
-  display: none;
-}
-
-[data-ui-mode='drawer'] .main-area {
-  width: 100%;
-  min-height: 0;
-  padding: 16px 14px 26px;
-}
-
-[data-ui-mode='drawer'] .topbar h1 {
-  font-size: 17px;
-}
-
-[data-ui-mode='drawer'] .overview-grid {
-  grid-template-columns: 1fr;
-}
-
-[data-ui-mode='drawer'] .month-insight {
-  display: none;
-}
-
-[data-ui-mode='drawer'] .calendar-day {
-  min-height: 58px;
-  padding: 4px 4px;
-}
-
-[data-ui-mode='drawer'] .day-tags {
-  margin-top: 3px;
-}
-
-[data-ui-mode='drawer'] .calendar-tag {
-  padding: 2px 3px;
-  font-size: 8px;
-}
-
-[data-ui-mode='drawer'] .settings-header {
-  padding-bottom: 18px;
-}
-
-[data-ui-mode='drawer'] .settings-layout {
-  grid-template-columns: 1fr;
-  gap: 14px;
-}
-
-[data-ui-mode='drawer'] .settings-nav {
-  position: static;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-[data-ui-mode='drawer'] .settings-nav-item {
-  min-height: 38px;
-  grid-template-columns: 22px auto;
-  padding: 0 12px;
-  gap: 7px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-}
-
-[data-ui-mode='drawer'] .settings-nav-item small,
-[data-ui-mode='drawer'] .settings-nav-item > svg,
-[data-ui-mode='drawer'] .settings-nav-note {
-  display: none;
-}
-
-[data-ui-mode='drawer'] .settings-content {
-  max-height: none;
-  overflow-y: visible;
-}
-
-[data-ui-mode='drawer'] .source-selector-grid,
-[data-ui-mode='drawer'] .theme-options,
-[data-ui-mode='drawer'] .ui-mode-options {
-  grid-template-columns: 1fr;
-}
-
 /* --- Notion 新建数据库面板 --- */
 
 .notion-dataset-actions {
