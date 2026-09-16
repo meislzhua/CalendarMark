@@ -77,7 +77,7 @@ npm run tauri:android:build
 工作流位于 `.github/workflows/`：
 
 - `ci.yml`：Pull Request / 主分支执行前端 lint、TypeScript build 和 Rust check。
-- `package.yml`：手动触发、主分支推送或 `v*` tag 触发 Windows、macOS、Android 打包并上传 Workflow Artifacts。
+- `package.yml`：手动触发、主分支推送或 `v*` tag 触发 Windows、macOS、Linux、Android 打包并上传 Workflow Artifacts；tag 构建还会把安装包发布到对应的 GitHub Release 提供下载。
 
 Android job 会安装 JDK 17、Android SDK platform/build-tools/NDK，并使用 `tauri android init --ci` 生成移动端工程。正式发布前建议再接入 Android keystore、Windows code signing 和 Apple signing/notarization secrets。
 
