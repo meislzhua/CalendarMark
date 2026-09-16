@@ -96,9 +96,15 @@ jobs:
       - name: Initialize Android project
         run: npx tauri android init --ci --skip-targets-install
       - name: Build Android APKs
-        run: npx tauri android build --ci --apk --split-per-abi
+        shell: bash
+        run: |
+          set -o pipefail
+          npx tauri android build --ci --apk --split-per-abi --verbose 2>&1 | tee android-apk-build.log
       - name: Build Android AAB
-        run: npx tauri android build --ci --aab
+        shell: bash
+        run: |
+          set -o pipefail
+          npx tauri android build --ci --aab --verbose 2>&1 | tee android-aab-build.log
       - name: Upload Android packages
         uses: actions/upload-artifact@v4
         with:
@@ -106,3 +112,9 @@ jobs:
           path: |
             src-tauri/gen/android/app/build/outputs/apk/**/*.apk
             src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
+      - name: Upload Android build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CalendarMark-android-build-logs
+          path: '*-build.log'
