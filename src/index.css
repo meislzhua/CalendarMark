@@ -1,0 +1,11 @@
+html {
+  background: #f5f3ee;
+}
+
+html[data-theme='dark'] {
+  background: #171d1a;
+}
+
+body {
+  min-width: 320px;
+}
