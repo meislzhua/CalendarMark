@@ -1,11 +1,11 @@
+#[cfg(desktop)]
 use tauri::{
     menu::{MenuBuilder, MenuItem},
+    tray::TrayIconBuilder,
     Emitter, Manager, WindowEvent,
 };
 
 #[cfg(desktop)]
-use tauri::tray::TrayIconBuilder;
-
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -15,20 +15,20 @@ fn show_main_window(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::default().build())
-        .setup(|app| {
+        .setup(|_app| {
             #[cfg(desktop)]
             {
-                app.handle()
+                _app.handle()
                     .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
 
                 let show_item =
-                    MenuItem::with_id(app, "show", "打开 CalendarMark", true, None::<&str>)?;
+                    MenuItem::with_id(_app, "show", "打开 CalendarMark", true, None::<&str>)?;
                 let settings_item =
-                    MenuItem::with_id(app, "settings", "打开设置", true, None::<&str>)?;
-                let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-                let menu = MenuBuilder::new(app)
+                    MenuItem::with_id(_app, "settings", "打开设置", true, None::<&str>)?;
+                let quit_item = MenuItem::with_id(_app, "quit", "退出", true, None::<&str>)?;
+                let menu = MenuBuilder::new(_app)
                     .items(&[&show_item, &settings_item, &quit_item])
                     .build()?;
 
@@ -45,20 +45,24 @@ pub fn run() {
                         _ => {}
                     });
 
-                if let Some(icon) = app.default_window_icon() {
+                if let Some(icon) = _app.default_window_icon() {
                     tray_builder = tray_builder.icon(icon.clone());
                 }
-                tray_builder.build(app)?;
+                tray_builder.build(_app)?;
             }
 
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
-            }
-        })
+        });
+
+    #[cfg(desktop)]
+    let builder = builder.on_window_event(|window, event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = window.hide();
+        }
+    });
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running CalendarMark");
 }
