@@ -235,8 +235,10 @@ jobs:
           done
           ls -lh release-assets
           test "$(find release-assets -name '*.apk' | wc -l)" -ge 4
-          if find release-assets -name '*unsigned*'; then
+          # GNU find 无匹配时也返回 0，必须用通配符检测
+          if ls release-assets/*unsigned* >/dev/null 2>&1; then
             echo "::error::APK is unsigned"
+            ls -l release-assets
             exit 1
           fi
           test -f "release-assets/CalendarMark_${VERSION}_universal.apk"
