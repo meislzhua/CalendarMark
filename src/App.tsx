@@ -3,6 +3,7 @@ import type { ChangeEvent, Dispatch, FormEvent, ReactNode, SetStateAction } from
 import {
   ArrowLeft,
   ArrowRight,
+  AppWindow,
   BookOpen,
   CalendarDays,
   Check,
@@ -25,6 +26,7 @@ import {
   MoreHorizontal,
   PanelRightClose,
   Palette,
+  PanelRight,
   Power,
   Plus,
   RefreshCw,
@@ -204,6 +206,7 @@ function App() {
   const [tags, setTags] = useState<Tag[]>(() => settings.dataSource === 'notion' ? [] : loadTags())
   const [draft, setDraft] = useState<CalendarEntry>(() => createDraft(today))
   const [newTagName, setNewTagName] = useState('')
+  const [tagManageMode, setTagManageMode] = useState(false)
   const [shortcutState, setShortcutState] = useState<'ready' | 'browser' | 'error'>('browser')
   const [notice, setNotice] = useState('')
   const [remoteDataState, setRemoteDataState] = useState<RemoteDataState>(settings.dataSource === 'notion' ? 'needs-config' : 'local')
@@ -460,6 +463,9 @@ function App() {
     if (!cleanName) return
     const existing = tags.find((tag) => tag.name.toLowerCase() === cleanName.toLowerCase())
     if (existing) {
+      if (existing.retired) {
+        setTags((previous) => previous.map((item) => (item.id === existing.id ? { ...item, retired: false } : item)))
+      }
       onAdded?.(existing)
       return
     }
@@ -505,57 +511,17 @@ function App() {
     event.target.value = ''
   }
 
-  async function deleteTag(tagId: string) {
-    const nextTags = tags.filter((tag) => tag.id !== tagId)
-    const changedEntries = entries
-      .filter((entry) => entry.tagIds.includes(tagId))
-      .map((entry) => ({ ...entry, tagIds: entry.tagIds.filter((id) => id !== tagId) }))
+  // 停用标签：只是不再提供选择；已有记录、抽屉草稿和远端内容都保持原样。
+  function retireTag(tagId: string) {
+    const tag = tags.find((item) => item.id === tagId)
+    if (!tag || tag.retired) return
+    setTags((previous) => previous.map((item) => (item.id === tagId ? { ...item, retired: true } : item)))
+    setNotice(`已停用标签「${tag.name}」，已有记录保持不变`)
+  }
 
-    if (settings.dataSource === 'notion' && changedEntries.length > 0) {
-      const target = getNotionTarget(settings)
-      if (!settings.notionToken.trim() || !target.databaseId) {
-        setNotice('请先在设置中配置 Notion Token 并添加数据集')
-        return
-      }
-
-      // 远程直连模式先写远端，成功后再更新界面状态，失败时保持与远端一致。
-      setRemoteDataState('saving')
-      try {
-        const result = await pushNotionEntries(
-          settings.notionToken,
-          target.databaseId,
-          target.dataSourceId || undefined,
-          changedEntries.map((entry) => toNotionEntryInput(entry, nextTags, target.dataSourceId || undefined)),
-        )
-        const pushedByLocalId = new Map(result.entries.map((entry) => [entry.localId, entry]))
-        setEntries((previous) => previous.map((entry) => {
-          const pushed = pushedByLocalId.get(entry.id)
-          return pushed ? applyPushResultToEntry(entry, { ...result, entries: [pushed] }) : entry
-        }))
-        setSettings((previous) => withNotionDataset(previous, {
-          databaseId: result.connection.databaseId,
-          databaseTitle: result.connection.databaseTitle,
-          dataSourceId: result.connection.dataSourceId,
-          dataSourceName: result.connection.dataSourceName,
-        }))
-        setRemoteDataState('ready')
-        setNotice(formatSyncNotice('标签已从 Notion 记录中移除', result.warnings))
-      } catch (error) {
-        setRemoteDataState('error')
-        setNotice(error instanceof Error ? error.message : String(error))
-        return
-      }
-    } else {
-      setTags(nextTags)
-      setNotice('标签已删除')
-    }
-
-    setEntries((previous) => previous.map((entry) => ({
-      ...entry,
-      tagIds: entry.tagIds.filter((id) => id !== tagId),
-    })))
-    setTags(nextTags)
-    setDraft((previous) => ({ ...previous, tagIds: previous.tagIds.filter((id) => id !== tagId) }))
+  function restoreTag(tagId: string) {
+    setTags((previous) => previous.map((item) => (item.id === tagId ? { ...item, retired: false } : item)))
+    setNotice('标签已恢复，可再次选择')
   }
 
   const isCurrentMonthToday = today.slice(0, 7) === toDateKey(currentMonth).slice(0, 7)
@@ -597,7 +563,7 @@ function App() {
 
         <div className="sidebar-section-label sidebar-section-label--spaced">快捷入口</div>
         <div className="quick-links">
-          {tags.slice(0, 4).map((tag) => (
+          {tags.filter((tag) => !tag.retired).slice(0, 4).map((tag) => (
             <button key={tag.id} className="quick-link" onClick={() => openDate(selectedDate)}>
               <span className={`tag-dot tag-dot--${tag.color}`} />
               <span>{tag.name}</span>
@@ -684,7 +650,7 @@ function App() {
                     return (
                       <button type="button" key={cell.dateKey} className={`calendar-day ${cell.isCurrentMonth ? '' : 'calendar-day--outside'} ${isToday ? 'calendar-day--today' : ''} ${isSelected ? 'calendar-day--selected' : ''}`} onClick={() => openDate(cell.dateKey)}>
                         <div className="day-number-row"><span className="day-number">{cell.date.getDate()}</span>{dayEntries.length > 0 && <span className="entry-count">{dayEntries.length}</span>}</div>
-                        <div className="day-tags">{dayTags.slice(0, 2).map((tag) => <span key={tag.id} className={`calendar-tag calendar-tag--${tag.color}`}>{tag.name}</span>)}{dayTags.length > 2 && <span className="more-tag">+{dayTags.length - 2}</span>}</div>
+                        <div className="day-tags">{dayTags.map((tag) => <span key={tag.id} className={`calendar-tag calendar-tag--${tag.color}`}>{tag.name}</span>)}</div>
                         {dayEntries.some((entry) => entry.attachments.length > 0) && <span className="attachment-indicator"><FileImage size={12} /></span>}
                       </button>
                     )
@@ -712,7 +678,7 @@ function App() {
             </section>
           </>
         ) : (
-          <SettingsView settings={settings} settingsSection={settingsSection} setSettingsSection={setSettingsSection} onChangeSettings={setSettings} entries={entries} onChangeEntries={setEntries} tags={tags} onChangeTags={setTags} onAddTag={(name) => addTag(name)} onDeleteTag={deleteTag} shortcutState={shortcutState} onNotice={setNotice} onReloadRemote={() => setRemoteReloadToken((token) => token + 1)} />
+          <SettingsView settings={settings} settingsSection={settingsSection} setSettingsSection={setSettingsSection} onChangeSettings={setSettings} entries={entries} onChangeEntries={setEntries} tags={tags} onChangeTags={setTags} onAddTag={(name) => addTag(name)} onDeleteTag={retireTag} onRestoreTag={restoreTag} shortcutState={shortcutState} onNotice={setNotice} onReloadRemote={() => setRemoteReloadToken((token) => token + 1)} />
         )}
       </main>
 
@@ -726,8 +692,13 @@ function App() {
               <input id="entry-title" className="title-input" placeholder="今天发生了什么？" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
               <label className="field-label" htmlFor="entry-content">内容</label>
               <textarea id="entry-content" className="content-textarea" placeholder="写下细节、想法或下一步行动……" value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} rows={7} />
-              <div className="field-label field-label--row"><span>快捷标签</span><span className="field-hint">点击即可切换</span></div>
-              <div className="tag-picker">{tags.map((tag) => <button type="button" key={tag.id} className={`tag-choice tag-choice--${tag.color} ${draft.tagIds.includes(tag.id) ? 'tag-choice--active' : ''}`} onClick={() => toggleDraftTag(tag.id)}><span className="tag-dot" />{tag.name}{draft.tagIds.includes(tag.id) && <Check size={13} />}</button>)}</div>
+              <div className="field-label field-label--row"><span>快捷标签</span>{tagManageMode
+                ? <button type="button" className="text-button" onClick={() => setTagManageMode(false)}>完成</button>
+                : <button type="button" className="text-button" onClick={() => setTagManageMode(true)}>管理</button>}</div>
+              <div className="tag-picker">{tags.filter((tag) => !tag.retired).map((tag) => tagManageMode
+                ? <span key={tag.id} className={`tag-choice tag-choice--${tag.color} tag-choice--managed`}><span className="tag-dot" />{tag.name}<button type="button" className="tag-retire-button" aria-label={`停用 ${tag.name}`} title="停用后不再提供选择，已有记录保持不变" onClick={() => retireTag(tag.id)}><X size={12} /></button></span>
+                : <button type="button" key={tag.id} className={`tag-choice tag-choice--${tag.color} ${draft.tagIds.includes(tag.id) ? 'tag-choice--active' : ''}`} onClick={() => toggleDraftTag(tag.id)}><span className="tag-dot" />{tag.name}{draft.tagIds.includes(tag.id) && <Check size={13} />}</button>)}</div>
+              {tagManageMode && <div className="field-hint tag-manage-hint">停用只影响后续选择，不会修改已有记录或远端内容。</div>}
               <div className="inline-add-tag"><input aria-label="新标签名称" placeholder="添加新标签" value={newTagName} onChange={(event) => setNewTagName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); handleAddTagFromDrawer() } }} /><button type="button" aria-label="添加标签" onClick={handleAddTagFromDrawer}><Plus size={15} /></button></div>
               <div className="field-label field-label--row"><span>附件</span><span className="field-hint">图片或文档，单个 ≤ 5 MB</span></div>
               <label className="upload-zone"><Upload size={18} /><span><strong>拖拽或选择文件</strong><small>支持图片、TXT、Markdown、PDF</small></span><input type="file" multiple accept="image/*,.txt,.md,.pdf" onChange={handleFiles} /></label>
@@ -760,13 +731,15 @@ type SettingsViewProps = {
   onChangeTags: (tags: Tag[]) => void
   onAddTag: (name: string) => void
   onDeleteTag: (tagId: string) => void
+  onRestoreTag: (tagId: string) => void
   shortcutState: 'ready' | 'browser' | 'error'
   onNotice: (message: string) => void
   onReloadRemote: () => void
 }
 
-function SettingsView({ settings, settingsSection, setSettingsSection, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onAddTag, onDeleteTag, shortcutState, onNotice, onReloadRemote }: SettingsViewProps) {
+function SettingsView({ settings, settingsSection, setSettingsSection, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onAddTag, onDeleteTag, onRestoreTag, shortcutState, onNotice, onReloadRemote }: SettingsViewProps) {
   const [newTag, setNewTag] = useState('')
+  const settingsScrollRef = useRef<HTMLElement | null>(null)
   const sections: { id: SettingsSection; label: string; description: string; icon: typeof Database }[] = [
     { id: 'source', label: '数据源', description: '选择数据来源', icon: Database },
     { id: 'system', label: '系统', description: '启动与快捷键', icon: Power },
@@ -774,6 +747,37 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
     { id: 'tags', label: '标签管理', description: '整理你的分类', icon: TagIcon },
   ]
   const update = (partial: Partial<AppSettings>) => onChangeSettings((previous) => ({ ...previous, ...partial }))
+
+  // 所有设置共享同一个滚动容器：导航点击平滑滚动到对应分区，
+  // 滚动时反向高亮当前分区，避免内容长短不同导致滚动条出现/消失引起布局偏移。
+  function scrollToSection(id: SettingsSection, smooth = true) {
+    setSettingsSection(id)
+    document.getElementById(`settings-section-${id}`)?.scrollIntoView({
+      behavior: smooth ? 'smooth' : 'auto',
+      block: 'start',
+    })
+  }
+
+  useEffect(() => {
+    const container = settingsScrollRef.current
+    if (!container) return undefined
+
+    // 恢复上次浏览的分区（首次挂载不需要动效）
+    const initial = container.querySelector<HTMLElement>(`#settings-section-${settingsSection}`)
+    initial?.scrollIntoView({ block: 'start' })
+
+    const observer = new IntersectionObserver((observed) => {
+      const visible = observed
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0]
+      const id = (visible?.target as HTMLElement | undefined)?.dataset.section as SettingsSection | undefined
+      if (id) setSettingsSection(id)
+    }, { root: container, rootMargin: '-12% 0px -55% 0px', threshold: [0.05, 0.25, 0.5, 0.75] })
+    container.querySelectorAll<HTMLElement>('.settings-section').forEach((node) => observer.observe(node))
+    return () => observer.disconnect()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   function submitTag(event: FormEvent) {
     event.preventDefault()
     if (!newTag.trim()) return
@@ -786,14 +790,39 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
     <header className="settings-header"><div><span className="eyebrow">偏好设置</span><h1>让 CalendarMark 更像你的工作台。</h1><p>连接数据、调整快捷方式和整理标签，一切都在这里完成。</p></div><div className="settings-header-mark"><Settings2 size={25} /></div></header>
     <div className="settings-layout">
       <nav className="settings-nav" aria-label="设置分类">
-        {sections.map(({ id, label, description, icon: Icon }) => <button key={id} className={settingsSection === id ? 'settings-nav-item active' : 'settings-nav-item'} onClick={() => setSettingsSection(id)}><span className="settings-nav-icon"><Icon size={17} /></span><span><strong>{label}</strong><small>{description}</small></span><ChevronRight size={15} /></button>)}
+        {sections.map(({ id, label, description, icon: Icon }) => <button key={id} className={settingsSection === id ? 'settings-nav-item active' : 'settings-nav-item'} onClick={() => scrollToSection(id)}><span className="settings-nav-icon"><Icon size={17} /></span><span><strong>{label}</strong><small>{description}</small></span><ChevronRight size={15} /></button>)}
         <div className="settings-nav-note"><CircleHelp size={15} /><span>数据源可以替换；外部连接凭据只保存在本机，不会上传到 CalendarMark 服务。</span></div>
       </nav>
-      <section className="settings-content">
-        {settingsSection === 'source' && <DataSourceSettings settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} onReloadRemote={onReloadRemote} />}
-        {settingsSection === 'system' && <SystemSettings settings={settings} onChangeSettings={onChangeSettings} shortcutState={shortcutState} onNotice={onNotice} />}
-        {settingsSection === 'interface' && <><SettingsTitle icon={<Palette size={18} />} eyebrow="界面" title="选择让你感觉舒服的明暗" description="主题设置会立即应用到 CalendarMark 的所有界面。" /><div className="theme-options"><ThemeOption icon={<Sun size={18} />} title="浅色" description="干净明亮的纸张感" active={settings.theme === 'light'} onClick={() => update({ theme: 'light' })} /><ThemeOption icon={<Moon size={18} />} title="深色" description="夜间记录更舒适" active={settings.theme === 'dark'} onClick={() => update({ theme: 'dark' })} /><ThemeOption icon={<Monitor size={18} />} title="跟随系统" description="随系统自动切换" active={settings.theme === 'auto'} onClick={() => update({ theme: 'auto' })} /></div><div className="preference-card"><div className="preference-row"><div className="preference-copy"><strong>启动时显示上次浏览的月份</strong><span>下次打开时保留你的浏览上下文</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div><div className="preference-row"><div className="preference-copy"><strong>关闭窗口时保留在托盘</strong><span>点击右上角关闭只隐藏窗口，不退出应用</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div></div></>}
-        {settingsSection === 'tags' && <><SettingsTitle icon={<TagIcon size={18} />} eyebrow="标签管理" title="让标签替你整理生活的纹理" description="快捷标签会显示在日历格子和记录抽屉里。" /><div className="tag-manager-card"><div className="tag-manager-header"><div><strong>我的标签</strong><span>{tags.length} 个标签</span></div><form className="tag-add-form" onSubmit={submitTag}><input aria-label="标签名称" placeholder="输入新标签" value={newTag} onChange={(event) => setNewTag(event.target.value)} /><button type="submit" aria-label="添加标签"><Plus size={16} /></button></form></div><div className="managed-tags">{tags.map((tag) => <div className="managed-tag" key={tag.id}><span className={`tag-dot tag-dot--${tag.color}`} /><span>{tag.name}</span><span className="managed-tag-count">快捷标签</span><button className="plain-icon-button" aria-label={`删除 ${tag.name}`} onClick={() => onDeleteTag(tag.id)}><Trash2 size={14} /></button></div>)}</div></div><div className="info-banner info-banner--warm"><Hash size={16} /><span>小建议：保持标签在 3–8 个之间，日历会更清晰，也更容易回顾。</span></div></>}
+      <section className="settings-content" ref={settingsScrollRef}>
+        <div className="settings-section" id="settings-section-source" data-section="source">
+          <DataSourceSettings settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} onReloadRemote={onReloadRemote} />
+        </div>
+        <div className="settings-section" id="settings-section-system" data-section="system">
+          <SystemSettings settings={settings} onChangeSettings={onChangeSettings} shortcutState={shortcutState} onNotice={onNotice} />
+        </div>
+        <div className="settings-section" id="settings-section-interface" data-section="interface">
+          <SettingsTitle icon={<Palette size={18} />} eyebrow="界面" title="选择让你感觉舒服的明暗" description="主题设置会立即应用到 CalendarMark 的所有界面。" />
+          <div className="ui-mode-options">
+            <button type="button" className={`ui-mode-option ${settings.uiMode === 'window' ? 'ui-mode-option--active' : ''}`} onClick={() => update({ uiMode: 'window' })}>
+              <AppWindow size={18} />
+              <span><strong>窗口模式</strong><small>常规桌面窗口，完整双栏布局</small></span>
+              {settings.uiMode === 'window' && <Check size={15} />}
+            </button>
+            <button type="button" className={`ui-mode-option ${settings.uiMode === 'drawer' ? 'ui-mode-option--active' : ''}`} onClick={() => update({ uiMode: 'drawer' })}>
+              <PanelRight size={18} />
+              <span><strong>抽屉模式</strong><small>贴屏幕右侧的窄边栏，桌面端专属</small></span>
+              {settings.uiMode === 'drawer' && <Check size={15} />}
+            </button>
+          </div>
+          <div className="theme-options"><ThemeOption icon={<Sun size={18} />} title="浅色" description="干净明亮的纸张感" active={settings.theme === 'light'} onClick={() => update({ theme: 'light' })} /><ThemeOption icon={<Moon size={18} />} title="深色" description="夜间记录更舒适" active={settings.theme === 'dark'} onClick={() => update({ theme: 'dark' })} /><ThemeOption icon={<Monitor size={18} />} title="跟随系统" description="随系统自动切换" active={settings.theme === 'auto'} onClick={() => update({ theme: 'auto' })} /></div>
+          <div className="preference-card"><div className="preference-row"><div className="preference-copy"><strong>启动时显示上次浏览的月份</strong><span>下次打开时保留你的浏览上下文</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div><div className="preference-row"><div className="preference-copy"><strong>关闭窗口时保留在托盘</strong><span>点击右上角关闭只隐藏窗口，不退出应用</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div></div>
+        </div>
+        <div className="settings-section" id="settings-section-tags" data-section="tags">
+          <SettingsTitle icon={<TagIcon size={18} />} eyebrow="标签管理" title="让标签替你整理生活的纹理" description="快捷标签会显示在日历格子和记录抽屉里；停用只是不再提供选择，已有记录保持不变。" />
+          <div className="tag-manager-card"><div className="tag-manager-header"><div><strong>我的标签</strong><span>{tags.filter((tag) => !tag.retired).length} 个可选标签</span></div><form className="tag-add-form" onSubmit={submitTag}><input aria-label="标签名称" placeholder="输入新标签" value={newTag} onChange={(event) => setNewTag(event.target.value)} /><button type="submit" aria-label="添加标签"><Plus size={16} /></button></form></div><div className="managed-tags">{tags.filter((tag) => !tag.retired).map((tag) => <div className="managed-tag" key={tag.id}><span className={`tag-dot tag-dot--${tag.color}`} /><span>{tag.name}</span><span className="managed-tag-count">{entries.filter((entry) => entry.tagIds.includes(tag.id)).length} 条记录</span><button className="plain-icon-button" aria-label={`停用 ${tag.name}`} title="停用后不再提供选择，已有记录保持不变" onClick={() => onDeleteTag(tag.id)}><Trash2 size={14} /></button></div>)}</div></div>
+          {tags.some((tag) => tag.retired) && <div className="tag-manager-card tag-manager-card--retired"><div className="tag-manager-header"><div><strong>已停用标签</strong><span>仍保留在历史记录中，可随时恢复选择</span></div></div><div className="managed-tags managed-tags--retired">{tags.filter((tag) => tag.retired).map((tag) => <div className="managed-tag" key={tag.id}><span className={`tag-dot tag-dot--${tag.color}`} /><span>{tag.name}</span><span className="managed-tag-count">{entries.filter((entry) => entry.tagIds.includes(tag.id)).length} 条记录</span><button className="text-button" onClick={() => onRestoreTag(tag.id)}>恢复</button></div>)}</div></div>}
+          <div className="info-banner info-banner--warm"><Hash size={16} /><span>小建议：保持标签在 3–8 个之间，日历会更清晰，也更容易回顾。</span></div>
+        </div>
       </section>
     </div>
   </div>

@@ -4,6 +4,8 @@ export type Tag = {
   id: string
   name: string
   color: TagColor
+  /** 停用后不再出现在选择列表，但已有记录和远端内容保持不变 */
+  retired?: boolean
 }
 
 export type Attachment = {
@@ -39,6 +41,9 @@ export type CalendarEntry = {
 }
 
 export type ThemeMode = 'light' | 'dark' | 'auto'
+
+/** 窗口模式：常规桌面窗口；抽屉模式：贴屏幕右侧的窄边栏（桌面端专属） */
+export type UiMode = 'window' | 'drawer'
 
 export type DataSourceId = 'notion' | 'local' | 'webdav' | 'obsidian'
 
@@ -93,6 +98,7 @@ export const DATA_SOURCE_DEFINITIONS: DataSourceDefinition[] = [
 export type AppSettings = {
   shortcut: string
   theme: ThemeMode
+  uiMode: UiMode
   dataSource: DataSourceId
   notionToken: string
   notionDatabaseId: string
@@ -119,6 +125,7 @@ export const DEFAULT_TAGS: Tag[] = [
 export const DEFAULT_SETTINGS: AppSettings = {
   shortcut: 'CommandOrControl+Shift+Space',
   theme: 'light',
+  uiMode: 'window',
   dataSource: 'local',
   notionToken: '',
   notionDatabaseId: '',
