@@ -79,7 +79,7 @@ jobs:
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: CalendarMark-${{ matrix.artifact }}
+          name: CalendarMark-${{ github.ref_name || github.sha }}-${{ matrix.artifact }}
           path: ${{ matrix.bundles }}
           if-no-files-found: error
       - name: Publish desktop packages to GitHub Release
@@ -92,6 +92,9 @@ jobs:
   android:
     name: Android / APK + AAB
     runs-on: ubuntu-latest
+    env:
+      CM_KEYSTORE_PASSWORD: calendarmark-release
+      CM_KEYSTORE_ALIAS: calendarmark
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -105,23 +108,37 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      # Android 工程由 tauri android init 在构建时生成，
-      # checkout 后仓库中没有 gradle 依赖文件，不能使用 setup-java 的 gradle 缓存，
-      # 这里手动缓存 Gradle 的下载与构建缓存目录。
+      # Android 工程由 tauri android init 在构建时生成，checkout 后没有 gradle 依赖文件，
+      # 因此不能用 setup-java 的 gradle 缓存，手动缓存 Gradle 目录；固定 key 命中后不会重复写入。
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ github.sha }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
+          key: gradle-android-v1
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
           key: android
+      # 发布签名 keystore：首次生成后由 Actions Cache 固定复用，保证升级安装签名一致。
+      - name: Restore release keystore
+        id: keystore
+        uses: actions/cache@v4
+        with:
+          path: calendarmark-release.keystore
+          key: android-release-keystore-v1
+      - name: Create release keystore
+        if: steps.keystore.outputs.cache-hit != 'true'
+        run: |
+          keytool -genkeypair -v \
+            -keystore calendarmark-release.keystore \
+            -alias "$CM_KEYSTORE_ALIAS" \
+            -keyalg RSA -keysize 2048 -validity 10950 \
+            -storepass "$CM_KEYSTORE_PASSWORD" \
+            -keypass "$CM_KEYSTORE_PASSWORD" \
+            -dname "CN=CalendarMark, OU=Dev, O=meislzhua, C=CN"
       - name: Configure runner Android SDK
         shell: bash
         run: |
@@ -152,26 +169,82 @@ jobs:
         run: npm ci
       - name: Initialize Android project
         run: npx tauri android init --ci --skip-targets-install
-      - name: Build Android APKs + AAB
+      - name: Configure release signing
+        shell: python
+        run: |
+          import os, re
+          gradle = "src-tauri/gen/android/app/build.gradle.kts"
+          s = open(gradle, encoding="utf-8").read()
+          if "signingConfigs" not in s:
+              signing = (
+                  "    signingConfigs {\n"
+                  "        create(\"release\") {\n"
+                  "            storeFile = rootProject.file(\"calendarmark-release.keystore\")\n"
+                  "            storePassword = System.getenv(\"CM_KEYSTORE_PASSWORD\")\n"
+                  "            keyAlias = System.getenv(\"CM_KEYSTORE_ALIAS\")\n"
+                  "            keyPassword = System.getenv(\"CM_KEYSTORE_PASSWORD\")\n"
+                  "        }\n"
+                  "    }\n"
+              )
+              if "buildTypes {" in s:
+                  s = s.replace("buildTypes {", signing + "    buildTypes {", 1)
+              else:
+                  s = re.sub(r"android\s*\{", lambda m: m.group(0) + "\n" + signing, s, count=1)
+          release_block = re.search(r"buildTypes\s*\{[\s\S]*?release\s*\{([\s\S]*?)\n\s*\}", s)
+          if release_block and "signingConfig" not in release_block.group(1):
+              s = re.sub(
+                  r"(buildTypes\s*\{[\s\S]*?release\s*\{)",
+                  lambda m: m.group(1) + "\n            signingConfig = signingConfigs.getByName(\"release\")",
+                  s,
+                  count=1,
+              )
+          open(gradle, "w", encoding="utf-8").write(s)
+          if "signingConfigs" not in s or "getByName(\"release\")" not in s:
+              raise SystemExit("failed to inject release signing config")
+          os.replace("calendarmark-release.keystore", "src-tauri/gen/android/calendarmark-release.keystore")
+          print("release signing configured")
+      - name: Build Android per-ABI APKs
         shell: bash
         run: |
           set -o pipefail
-          npx tauri android build --ci --apk --aab --split-per-abi --verbose 2>&1 | tee android-build.log
+          npx tauri android build --ci --apk --split-per-abi --verbose 2>&1 | tee android-build.log
+      - name: Build Android universal APK + AAB
+        shell: bash
+        run: |
+          set -o pipefail
+          npx tauri android build --ci --apk --aab --verbose 2>&1 | tee -a android-build.log
+      - name: Collect versioned Android packages
+        shell: bash
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          OUT="src-tauri/gen/android/app/build/outputs"
+          mkdir -p release-assets
+          find "$OUT/apk" -name "*-release*.apk" | while read -r f; do
+            base="$(basename "$f")"
+            base="${base#app-}"
+            base="${base%-*release.apk}"
+            base="${base%-unsigned}"
+            cp "$f" "release-assets/CalendarMark_${VERSION}_${base}.apk"
+          done
+          find "$OUT/bundle" -name "*-release*.aab" | while read -r f; do
+            cp "$f" "release-assets/CalendarMark_${VERSION}.aab"
+          done
+          ls -lh release-assets
+          test "$(find release-assets -name '*.apk' | wc -l)" -ge 4
+          test -f "release-assets/CalendarMark_${VERSION}_universal.apk"
+          test -f "release-assets/CalendarMark_${VERSION}.aab"
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: CalendarMark-android
-          path: |
-            src-tauri/gen/android/app/build/outputs/apk/**/*.apk
-            src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
+          name: CalendarMark-${{ github.ref_name || github.sha }}-android
+          path: release-assets/*
           if-no-files-found: error
       - name: Publish Android packages to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            src-tauri/gen/android/app/build/outputs/apk/**/*.apk
-            src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
+          files: release-assets/*
           fail_on_unmatched_files: true
       - name: Upload Android build logs
         if: always()
