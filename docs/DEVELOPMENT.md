@@ -44,6 +44,7 @@ Notion 已由 `src-tauri/src/notion.rs` 通过 Rust HTTP client 接入，React �
 - 不把 Integration Token 写入日志、错误 toast 或 GitHub Actions 输出；请求错误只返回 HTTP 状态和 Notion message。
 - 当前 Token 为了 MVP 体验保存在 WebView localStorage，正式发布前应迁移到 Tauri Store 的安全后端或系统 Keychain。
 - 点击“发现数据集”时使用 `POST /search` 的 `object=data_source` 过滤器和游标分页，列出当前 Token 可访问的数据源；用户添加的数据集保存在 `AppSettings.notionDatasets`，可以保存多个并切换。
+- “新建数据库”先通过 `POST /search` 的 `object=page` 列出可作为父级的页面，再用 `POST /databases` 创建标准属性结构；Notion API 不允许在 workspace 根级创建数据库，父级页面是硬性要求。
 - 选定数据集后调用 Retrieve a database / Retrieve a data source 读取 schema；数据库包含多个 data source 时仍可从连接结果切换。旧版本只保存 Database ID 的设置仍可兼容读取，并会在成功连接后迁移到数据集列表。
 - 字段映射按属性类型优先、按中文/英文名称辅助识别：`title` + `date` 为必需，`rich_text` / `multi_select` / `files` 为可选。
 - 查询使用 cursor 分页；429 和 5xx 最多做三次短退避重试。
@@ -56,6 +57,8 @@ Notion 已由 `src-tauri/src/notion.rs` 通过 Rust HTTP client 接入，React �
 - 开机启动由 `tauri-plugin-autostart` 实现，插件只在桌面目标初始化；能力文件只授权 `enable/disable/is-enabled` 三个命令。
 - `src/tauri.ts` 中的 `readAutostartEnabled` / `setAutostartEnabled` 负责浏览器和移动端降级，UI 层不需要重复判断平台。
 - 快捷键录制在 `SystemSettings` 中通过捕获型 `keydown` 监听实现：至少一个 Ctrl/Cmd/Alt 修饰键 + 普通按键才生成合法 accelerator，Esc 取消录制。
+- 标签删除是“停用”语义：只更新 `Tag.retired`，不要从 entries、draft 或 Notion 内容中移除标签引用；需要真正清理历史时再引入显式的批量操作。
+- 抽屉模式依赖 `get_window_work_area` 命令与窗口权限；新增窗口操作时同步更新 capabilities，浏览器预览通过 `isDesktopTauriRuntime` 降级。
 
 本地可以使用单元测试验证字段映射和 ID 规范化：
 
