@@ -51,6 +51,7 @@ pub struct NotionMappingInfo {
     pub content_property: Option<String>,
     pub tags_property: Option<String>,
     pub files_property: Option<String>,
+    pub mood_property: Option<String>,
     pub message: Option<String>,
 }
 
@@ -93,6 +94,7 @@ pub struct NotionEntryRecord {
     pub title: String,
     pub content: String,
     pub tag_names: Vec<String>,
+    pub mood: Option<String>,
     pub attachments: Vec<NotionAttachmentRecord>,
     pub updated_at: String,
     pub url: Option<String>,
@@ -104,6 +106,55 @@ pub struct NotionPullResult {
     pub connection: NotionConnectionInfo,
     pub entries: Vec<NotionEntryRecord>,
     pub warnings: Vec<String>,
+}
+
+/// 数据源查询条件：按日期区间和/或标签筛选（日期为 YYYY-MM-DD）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionPullQuery {
+    pub date_start: Option<String>,
+    pub date_end: Option<String>,
+    pub tag: Option<String>,
+}
+
+fn build_query_filter(
+    mapping: &NotionMappingInfo,
+    query: Option<&NotionPullQuery>,
+) -> Option<Value> {
+    let query = query?;
+    let mut conditions = Vec::new();
+
+    if let Some(date_property) = mapping.date_property.as_deref() {
+        let mut date_condition = Map::new();
+        if let Some(start) = query.date_start.as_deref().filter(|v| !v.trim().is_empty()) {
+            date_condition.insert("on_or_after".to_string(), json!(start));
+        }
+        if let Some(end) = query.date_end.as_deref().filter(|v| !v.trim().is_empty()) {
+            date_condition.insert("before".to_string(), json!(end));
+        }
+        if !date_condition.is_empty() {
+            conditions.push(json!({
+                "property": date_property,
+                "date": date_condition
+            }));
+        }
+    }
+
+    if let (Some(tags_property), Some(tag)) = (
+        mapping.tags_property.as_deref(),
+        query.tag.as_deref().filter(|v| !v.trim().is_empty()),
+    ) {
+        conditions.push(json!({
+            "property": tags_property,
+            "multi_select": { "contains": tag }
+        }));
+    }
+
+    match conditions.len() {
+        0 => None,
+        1 => Some(conditions.into_iter().next()?),
+        _ => Some(json!({ "and": conditions })),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +177,7 @@ pub struct NotionEntryInput {
     pub title: String,
     pub content: String,
     pub tag_names: Vec<String>,
+    pub mood: Option<String>,
     pub attachments: Vec<NotionAttachmentInput>,
 }
 
@@ -355,6 +407,7 @@ pub async fn notion_pull_entries(
     token: String,
     database_id: String,
     data_source_id: Option<String>,
+    query: Option<NotionPullQuery>,
 ) -> Result<NotionPullResult, String> {
     let client = notion_client()?;
     let connected =
@@ -376,6 +429,10 @@ pub async fn notion_pull_entries(
 
         let mut body = Map::new();
         body.insert("page_size".to_string(), json!(PAGE_SIZE));
+        // 数据源接口按月/按标签筛选，避免每次切换年月都全量分页拉取
+        if let Some(filter) = build_query_filter(&connected.info.mapping, query.as_ref()) {
+            body.insert("filter".to_string(), filter);
+        }
         if let Some(value) = cursor.as_deref() {
             body.insert("start_cursor".to_string(), json!(value));
         }
@@ -829,6 +886,11 @@ fn build_mapping(properties: &[PropertyDescriptor]) -> NotionMappingInfo {
         "files",
         &["attachments", "attachment", "files", "file", "附件", "图片"],
     );
+    let mood_property = choose_property(
+        properties,
+        "select",
+        &["mood", "心情", "emotion", "情绪"],
+    );
     let ready = title_property.is_some() && date_property.is_some();
     let message = if ready {
         None
@@ -843,6 +905,7 @@ fn build_mapping(properties: &[PropertyDescriptor]) -> NotionMappingInfo {
         content_property,
         tags_property,
         files_property,
+        mood_property,
         message,
     }
 }
@@ -912,6 +975,15 @@ fn parse_page(page: &Value, connected: &ConnectedNotion) -> Result<NotionEntryRe
         .unwrap_or_default();
     let tag_names = property_multi_select(properties, mapping.tags_property.as_deref());
     let attachments = property_files(properties, mapping.files_property.as_deref());
+    let mood = mapping
+        .mood_property
+        .as_deref()
+        .and_then(|name| properties.get(name))
+        .and_then(|property| property.get("select"))
+        .and_then(|select| select.get("name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .map(ToOwned::to_owned);
 
     Ok(NotionEntryRecord {
         remote_id,
@@ -920,6 +992,7 @@ fn parse_page(page: &Value, connected: &ConnectedNotion) -> Result<NotionEntryRe
         title,
         content,
         tag_names,
+        mood,
         attachments,
         updated_at: page
             .get("last_edited_time")
@@ -1090,6 +1163,20 @@ async fn build_page_properties(
             })
             .collect::<Vec<_>>();
         properties.insert(property_name.to_string(), json!({ "multi_select": values }));
+    }
+
+    if let Some(property_name) = mapping.mood_property.as_deref() {
+        // None 写 null 用于清除远端心情
+        let mood = entry
+            .mood
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|mood| json!({ "name": mood }));
+        properties.insert(
+            property_name.to_string(),
+            json!({ "select": mood }),
+        );
     }
 
     let mut uploaded_attachments = 0;
