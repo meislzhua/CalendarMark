@@ -105,6 +105,7 @@ export type NotionPushRecord = {
   updatedAt: string
   url?: string
   uploadedAttachments: number
+  attachments: NotionAttachmentRecord[]
 }
 
 export type NotionPushResult = {

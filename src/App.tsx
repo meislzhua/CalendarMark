@@ -1093,8 +1093,21 @@ function applyPushResult(result: NotionPushResult, onChangeEntries: (entries: Ca
 function applyPushResultToEntry(entry: CalendarEntry, result: NotionPushResult): CalendarEntry {
   const pushed = result.entries.find((item) => item.localId === entry.id)
   if (!pushed) return entry
+  // 合并 Notion 返回的附件稳定引用（file upload ID / external 链接），
+  // 后续再次编辑保存时复用引用，而不是把同一文件重新上传一遍。
+  const attachments = entry.attachments.map((attachment, index) => {
+    const reference = pushed.attachments?.[index]
+    if (!reference || reference.name !== attachment.name) return attachment
+    return {
+      ...attachment,
+      sourceUrl: reference.sourceUrl ?? attachment.sourceUrl,
+      remoteId: reference.remoteId ?? attachment.remoteId,
+      remoteFile: reference.remoteFile ?? attachment.remoteFile,
+    }
+  })
   return {
     ...entry,
+    attachments,
     updatedAt: pushed.updatedAt || entry.updatedAt,
     remote: {
       provider: 'notion',

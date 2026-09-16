@@ -138,6 +138,8 @@ pub struct NotionPushRecord {
     pub updated_at: String,
     pub url: Option<String>,
     pub uploaded_attachments: usize,
+    /// 回传每个附件在 Notion 侧的稳定引用，前端保存后再次编辑时可直接复用，避免重复上传。
+    pub attachments: Vec<NotionAttachmentRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -431,7 +433,7 @@ pub async fn notion_push_entries(
     append_mapping_warnings(&connected.info.mapping, &mut warnings);
 
     for entry in entries {
-        let (properties, uploaded_attachments) =
+        let (properties, uploaded_attachments, attachment_refs) =
             build_page_properties(&client, &token, &connected, &entry, &mut warnings).await?;
         let response = if let Some(remote_id) = entry.remote_id.as_deref() {
             let page_id = normalize_uuid(remote_id, "Notion page ID")?;
@@ -476,6 +478,7 @@ pub async fn notion_push_entries(
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
             uploaded_attachments,
+            attachments: attachment_refs,
         });
     }
 
@@ -860,7 +863,7 @@ async fn build_page_properties(
     connected: &ConnectedNotion,
     entry: &NotionEntryInput,
     warnings: &mut Vec<String>,
-) -> Result<(Map<String, Value>, usize), String> {
+) -> Result<(Map<String, Value>, usize, Vec<NotionAttachmentRecord>), String> {
     let mapping = &connected.info.mapping;
     let mut properties = Map::new();
     let title = if entry.title.trim().is_empty() {
@@ -909,9 +912,38 @@ async fn build_page_properties(
     }
 
     let mut uploaded_attachments = 0;
+    let mut attachment_refs = Vec::new();
     if let Some(property_name) = mapping.files_property.as_deref() {
         let mut files = Vec::new();
         for attachment in &entry.attachments {
+            let mut reference = NotionAttachmentRecord {
+                name: attachment.name.clone(),
+                mime_type: attachment.mime_type.clone(),
+                size: 0,
+                source_url: None,
+                remote_id: None,
+                remote_file: None,
+            };
+
+            // 优先复用 file_upload ID：它是稳定引用，不受签名 URL 过期影响。
+            if let Some(remote_id) = attachment
+                .remote_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if let Ok(remote_id) = normalize_uuid(remote_id, "Notion file upload ID") {
+                    files.push(json!({
+                        "type": "file_upload",
+                        "file_upload": { "id": remote_id },
+                        "name": attachment.name
+                    }));
+                    reference.remote_id = Some(remote_id);
+                    attachment_refs.push(reference);
+                    continue;
+                }
+            }
+
             if let Some(remote_file) = attachment.remote_file.as_ref() {
                 let property_key = match remote_file.kind.as_str() {
                     "file" => "file",
@@ -923,19 +955,12 @@ async fn build_page_properties(
                     file.insert("name".to_string(), json!(attachment.name));
                     file.insert(property_key.to_string(), remote_file.value.clone());
                     files.push(Value::Object(file));
+                    reference.remote_file = Some(remote_file.clone());
+                    attachment_refs.push(reference);
                     continue;
                 }
             }
-            if let Some(remote_id) = attachment.remote_id.as_deref() {
-                if let Ok(remote_id) = normalize_uuid(remote_id, "Notion file upload ID") {
-                    files.push(json!({
-                        "type": "file_upload",
-                        "file_upload": { "id": remote_id },
-                        "name": attachment.name
-                    }));
-                    continue;
-                }
-            }
+
             if attachment.data_url.trim().is_empty() {
                 if let Some(source_url) = attachment
                     .source_url
@@ -946,12 +971,14 @@ async fn build_page_properties(
                         "name": attachment.name,
                         "external": { "url": source_url }
                     }));
+                    reference.source_url = Some(source_url.to_string());
                 } else {
                     warnings.push(format!(
                         "记录 {} 的附件 {} 没有可用的本地或远程文件内容。",
                         entry.local_id, attachment.name
                     ));
                 }
+                attachment_refs.push(reference);
                 continue;
             }
             match upload_attachment(client, token, attachment).await {
@@ -962,12 +989,14 @@ async fn build_page_properties(
                         "name": attachment.name
                     }));
                     uploaded_attachments += 1;
+                    reference.remote_id = Some(file_upload_id);
                 }
                 Err(message) => warnings.push(format!(
                     "记录 {} 的附件 {} 未上传：{}",
                     entry.local_id, attachment.name, message
                 )),
             }
+            attachment_refs.push(reference);
         }
         properties.insert(property_name.to_string(), json!({ "files": files }));
     } else if entry
@@ -981,7 +1010,7 @@ async fn build_page_properties(
         ));
     }
 
-    Ok((properties, uploaded_attachments))
+    Ok((properties, uploaded_attachments, attachment_refs))
 }
 
 async fn upload_attachment(
