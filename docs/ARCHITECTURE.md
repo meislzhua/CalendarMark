@@ -27,7 +27,7 @@
 
 ### `src/types.ts`
 
-集中定义 `CalendarEntry`、`Tag`、`Attachment`、`AppSettings`，并提供日期键、种子数据和 ID 工具，避免 UI 组件重复解释数据格式。
+集中定义 `CalendarEntry`、`Tag`、`Attachment`、`AppSettings`、`DataSourceId` 和 `DATA_SOURCE_DEFINITIONS`，并提供日期键、种子数据和 ID 工具，避免 UI 组件重复解释数据格式。数据源定义包含 `notion`、`local`、`webdav`、`obsidian` 四个入口及 `active / preview / planned` 状态，新增 provider 时不需要重写设置页的选择器。
 
 ### `src/storage.ts`
 
@@ -88,7 +88,19 @@ type Attachment = {
 
 日期使用本地 `YYYY-MM-DD`，不直接序列化 `Date`，避免跨时区同步时出现前后一天的问题。
 
-## 5. Notion 数据源边界
+## 5. 可替换数据源和 Notion 边界
+
+设置页采用“数据源选择器 + provider 配置面板”的两层结构：
+
+```text
+DataSourceDefinition[]
+├── Notion          preview  → Token / Database ID / 连接引导
+├── 本地存储         active   → 无需配置
+├── WebDAV           planned
+└── Obsidian Vault   planned
+```
+
+`AppSettings.dataSource` 只保存当前选择，Notion 专属字段仍以 `notionToken` 和 `notionDatabaseId` 保存。这样切换到其他 provider 时不会丢弃已有 Notion 配置，也不会把外部数据源的字段塞进一个不可扩展的通用表单。
 
 推荐下一阶段加入 `src/dataSources/`：
 
@@ -100,7 +112,9 @@ DataSource
 └── disconnect(): void
 ```
 
-`NotionDataSource` 应由 Rust 侧通过 HTTP client 请求 Notion API，前端只传递用户操作和已脱敏的同步结果。Token 存储优先使用系统 Keychain/Windows Credential Manager，而不是 localStorage。同步应包含：分页、指数退避、字段映射校验、远端 `last_edited_time` 与本地 `updatedAt` 的冲突策略。
+`NotionDataSource` 应由 Rust 侧通过 HTTP client 请求 Notion API，前端只传递用户操作和已脱敏的同步结果。设置页已内嵌连接引导：创建 Internal connection、将数据库通过 Add connections 分享给连接、从 Share → Copy link 提取 Database ID。Token 存储优先使用系统 Keychain/Windows Credential Manager，而不是 localStorage。同步应包含：分页、指数退避、字段映射校验、远端 `last_edited_time` 与本地 `updatedAt` 的冲突策略。
+
+Notion 当前 API 还区分 database container 与 data source：用户先提供 Database ID，连接成功后由适配器调用 Retrieve a database 发现 `data_sources`，再使用对应的 data source ID 读取 schema 和记录。
 
 ## 6. 权限和安全
 

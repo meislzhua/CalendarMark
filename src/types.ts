@@ -26,9 +26,53 @@ export type CalendarEntry = {
 
 export type ThemeMode = 'light' | 'dark' | 'auto'
 
+export type DataSourceId = 'notion' | 'local' | 'webdav' | 'obsidian'
+
+export type DataSourceStatus = 'active' | 'preview' | 'planned'
+
+export type DataSourceDefinition = {
+  id: DataSourceId
+  label: string
+  description: string
+  detail: string
+  status: DataSourceStatus
+}
+
+export const DATA_SOURCE_DEFINITIONS: DataSourceDefinition[] = [
+  {
+    id: 'notion',
+    label: 'Notion',
+    description: '云端数据库，适合跨设备同步',
+    detail: '首个外部数据源 · 配置预览',
+    status: 'preview',
+  },
+  {
+    id: 'local',
+    label: '本地存储',
+    description: '离线优先，数据保存在此设备',
+    detail: '当前可用 · 无需连接',
+    status: 'active',
+  },
+  {
+    id: 'webdav',
+    label: 'WebDAV',
+    description: '连接自托管文件服务',
+    detail: '计划支持',
+    status: 'planned',
+  },
+  {
+    id: 'obsidian',
+    label: 'Obsidian Vault',
+    description: '将记录保存为 Markdown 文件',
+    detail: '计划支持',
+    status: 'planned',
+  },
+]
+
 export type AppSettings = {
   shortcut: string
   theme: ThemeMode
+  dataSource: DataSourceId
   notionToken: string
   notionDatabaseId: string
 }
@@ -52,6 +96,7 @@ export const DEFAULT_TAGS: Tag[] = [
 export const DEFAULT_SETTINGS: AppSettings = {
   shortcut: 'CommandOrControl+Shift+Space',
   theme: 'light',
+  dataSource: 'notion',
   notionToken: '',
   notionDatabaseId: '',
 }

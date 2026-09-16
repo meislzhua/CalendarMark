@@ -38,13 +38,16 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 ## 4. Notion 开发约定
 
-当前设置页只保存配置，不请求 Notion。真实接入时请遵循：
+当前设置页提供可替换数据源选择器；Notion 面板会引导用户创建 Internal connection、分享目标数据库并提取 Database ID，但仍只保存配置，不请求 Notion。真实接入时请遵循：
 
 - 不在 React 前端直接调用 Notion API。
 - 不把 Integration Token 写入日志、错误 toast 或 GitHub Actions 输出。
 - 将 Token 放入 Tauri Store 的安全后端或系统 Keychain。
+- 使用 Database ID 先调用 Retrieve a database，发现对应的 data source ID，再读取 data source schema。
 - 为数据库字段建立可配置映射，不假设用户数据库属性名称一定是英文。
 - 使用分页和重试；同步结果可解释，冲突需要用户可见。
+
+官方参考：[快速开始](https://developers.notion.com/guides/get-started/quick-start)、[授权与页面分享](https://developers.notion.com/guides/get-started/authorization)、[数据库与 data source](https://developers.notion.com/guides/data-apis/working-with-databases)。
 
 ## 5. GitHub Actions
 

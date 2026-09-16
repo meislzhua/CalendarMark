@@ -2,7 +2,7 @@
 
 CalendarMark 是一个基于 Tauri 2 的本地优先日历记录工具：用标签标记日期，用文字和图片保存当天的上下文，再通过一个全局快捷键快速回到记录窗口。
 
-> 当前版本是可运行的 MVP：日历、标签、日期记录、图片/文档附件、右侧抽屉动画、Windows/macOS 托盘与快捷键入口已经完成；Notion 页面已完成配置界面与数据源边界，真实双向同步将在下一阶段接入。
+> 当前版本是可运行的 MVP：日历、标签、日期记录、图片/文档附件、右侧抽屉动画、Windows/macOS 托盘与快捷键入口已经完成；设置页已经按可替换数据源设计，Notion 提供首个外部连接配置入口，真实双向同步将在下一阶段接入。
 
 ## 产品要点
 
@@ -12,7 +12,7 @@ CalendarMark 是一个基于 Tauri 2 的本地优先日历记录工具：用标�
 - **快捷标签**：预置标签可一键切换，也可在抽屉或设置中创建、删除。
 - **桌面入口**：Windows/macOS 使用托盘菜单打开主界面、打开设置或退出；关闭窗口默认隐藏到托盘。
 - **全局快捷键**：默认 `Ctrl/Cmd + Shift + Space`，可在设置中修改。
-- **数据源**：首个数据源为 Notion，当前提供 Integration Token 与 Database ID 配置入口。
+- **可替换数据源**：设置页提供 Notion、本地存储和后续数据源的统一选择入口；当前首个外部适配器为 Notion。
 - **本地优先**：MVP 使用 WebView 本地存储保存草稿，不依赖服务端即可使用。
 
 ## 技术栈
@@ -99,12 +99,18 @@ Android job 会安装 JDK 17、Android SDK platform/build-tools/NDK，并使用 
 
 ## Notion 配置说明
 
-在“设置 → 数据源”中填写 Notion Integration Token 与 Database ID。MVP 只将配置保存在本机并展示连接状态，不会将令牌发给 CalendarMark 自有服务。真正接入同步时，推荐由 Rust 侧完成 Notion API 请求，并使用系统密钥链保存令牌；详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+在“设置 → 数据源”中选择 Notion，页面会直接展示连接引导：
+
+1. 在 Notion Integrations 创建 Internal connection，并在 Configuration 复制 Installation access token。
+2. 打开目标数据库的 `•••` 菜单，选择 Add connections，将该连接加入数据库。
+3. 将数据库作为整页打开，使用 Share → Copy link，复制 URL 中 workspace 后、`?v=` 前的 32 位字符串作为 Database ID。
+
+页面内提供了 [Notion 官方快速开始](https://developers.notion.com/guides/get-started/quick-start)、[授权说明](https://developers.notion.com/guides/get-started/authorization) 和 Integrations 入口。Token 是秘密信息，不应截图、提交到 Git 或发送给他人。MVP 只将配置保存在本机，不会将令牌发给 CalendarMark 自有服务；真正接入同步时，推荐由 Rust 侧完成 Notion API 请求，并使用系统密钥链保存令牌，详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ## 当前边界
 
 - 本地记录目前使用 WebView localStorage；附件以 Data URL 保存，单个文件限制为 5 MB，适合 MVP 演示，不适合大规模资料库。
-- Notion 连接表单和数据映射约定已经确定，真实 API 同步、冲突解决、分页与重试属于下一阶段。
+- 数据源选择器和 Notion 连接引导已经完成；当前 Notion 仍是配置预览，真实 API 同步、冲突解决、分页与重试属于下一阶段。
 - Android 共享了 React UI 与数据模型；托盘和桌面全局快捷键只在桌面目标启用。
 
 ## 许可证

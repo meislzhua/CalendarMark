@@ -3,6 +3,7 @@ import type { ChangeEvent, FormEvent, ReactNode } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
+  BookOpen,
   CalendarDays,
   Check,
   ChevronLeft,
@@ -13,6 +14,8 @@ import {
   Database,
   FileImage,
   FileText,
+  ExternalLink,
+  HardDrive,
   Hash,
   KeyRound,
   Keyboard,
@@ -38,6 +41,7 @@ import {
 } from 'lucide-react'
 import './App.css'
 import {
+  DATA_SOURCE_DEFINITIONS,
   DEFAULT_SETTINGS,
   TAG_COLORS,
   createId,
@@ -49,6 +53,7 @@ import type {
   AppSettings,
   Attachment,
   CalendarEntry,
+  DataSourceId,
   Tag,
 } from './types'
 import {
@@ -481,7 +486,7 @@ type SettingsViewProps = {
 function SettingsView({ settings, settingsSection, setSettingsSection, onChangeSettings, tags, onAddTag, onDeleteTag, shortcutState, onNotice }: SettingsViewProps) {
   const [newTag, setNewTag] = useState('')
   const sections: { id: SettingsSection; label: string; description: string; icon: typeof Database }[] = [
-    { id: 'source', label: '数据源', description: '连接 Notion', icon: Database },
+    { id: 'source', label: '数据源', description: '选择数据来源', icon: Database },
     { id: 'shortcut', label: '快捷键', description: '随时打开窗口', icon: Keyboard },
     { id: 'interface', label: '界面', description: '调整显示方式', icon: Palette },
     { id: 'tags', label: '标签管理', description: '整理你的分类', icon: TagIcon },
@@ -500,16 +505,106 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
     <div className="settings-layout">
       <nav className="settings-nav" aria-label="设置分类">
         {sections.map(({ id, label, description, icon: Icon }) => <button key={id} className={settingsSection === id ? 'settings-nav-item active' : 'settings-nav-item'} onClick={() => setSettingsSection(id)}><span className="settings-nav-icon"><Icon size={17} /></span><span><strong>{label}</strong><small>{description}</small></span><ChevronRight size={15} /></button>)}
-        <div className="settings-nav-note"><CircleHelp size={15} /><span>数据保存在本地，Notion 令牌不会上传到 CalendarMark 服务。</span></div>
+        <div className="settings-nav-note"><CircleHelp size={15} /><span>数据源可以替换；外部连接凭据只保存在本机，不会上传到 CalendarMark 服务。</span></div>
       </nav>
       <section className="settings-content">
-        {settingsSection === 'source' && <><SettingsTitle icon={<Database size={18} />} eyebrow="数据源" title="把日历同步到 Notion" description="目前首先支持 Notion。连接后，日期记录可以映射到你的 Notion 数据库。" /><div className="source-card source-card--notion"><div className="source-card-top"><div className="notion-logo">N</div><div><strong>Notion</strong><span>首个接入的数据源</span></div><span className="connection-badge"><span className="status-dot status-dot--muted" />未连接</span></div><div className="source-divider" /><div className="source-fields"><label className="field-label" htmlFor="notion-token"><span>Integration Token</span><span className="field-hint"><KeyRound size={12} />仅保存在本机</span></label><input id="notion-token" className="settings-input" type="password" placeholder="secret_…" value={settings.notionToken} onChange={(event) => update({ notionToken: event.target.value })} /><label className="field-label" htmlFor="notion-database"><span>Database ID</span><span className="field-hint"><Link2 size={12} />从数据库链接中复制</span></label><input id="notion-database" className="settings-input" placeholder="32 位 Database ID" value={settings.notionDatabaseId} onChange={(event) => update({ notionDatabaseId: event.target.value })} /></div><div className="source-card-footer"><span><Cloud size={15} />同步能力将在完成连接后启用</span><button className="secondary-button" onClick={() => onNotice(settings.notionToken && settings.notionDatabaseId ? '配置已保存，Notion 同步适配器待接入' : '请先填写 Token 和 Database ID')}><RefreshCw size={15} />检查配置</button></div></div><div className="info-banner"><Sparkles size={16} /><span><strong>数据映射建议：</strong>Notion 数据库至少包含 Date、Title、Content 和 Tags 属性，CalendarMark 会负责日期与标签的转换。</span></div></>}
+        {settingsSection === 'source' && <DataSourceSettings settings={settings} onChangeSettings={onChangeSettings} onNotice={onNotice} />}
         {settingsSection === 'shortcut' && <><SettingsTitle icon={<Keyboard size={18} />} eyebrow="快捷键" title="不用打断思路，就能打开记录窗口" description="桌面版会在启动时注册全局快捷键；浏览器预览不会抢占系统快捷键。" /><div className="preference-card"><div className="preference-row"><div className="preference-copy"><strong>打开 CalendarMark</strong><span>建议使用不容易和其他软件冲突的组合键</span></div><div className="shortcut-input-wrap"><Command size={15} /><input aria-label="全局快捷键" value={settings.shortcut} onChange={(event) => update({ shortcut: event.target.value })} /></div></div><div className="preference-row preference-row--subtle"><span className="connection-badge connection-badge--plain"><span className={`status-dot ${shortcutState === 'error' ? 'status-dot--error' : ''}`} />{shortcutState === 'ready' ? '桌面快捷键已注册' : shortcutState === 'error' ? '快捷键注册失败，请更换组合' : '浏览器预览模式'}</span><button className="text-button" onClick={() => update({ shortcut: DEFAULT_SETTINGS.shortcut })}>恢复默认</button></div></div><div className="shortcut-preview"><div className="shortcut-preview-icon"><Zap size={18} /></div><div><strong>快速记录的节奏</strong><p>按下快捷键后，CalendarMark 会显示主窗口；再点击某一天即可打开右侧记录抽屉。</p></div><kbd>{settings.shortcut.replace('CommandOrControl', 'Ctrl')}</kbd></div></>}
         {settingsSection === 'interface' && <><SettingsTitle icon={<Palette size={18} />} eyebrow="界面" title="选择让你感觉舒服的明暗" description="主题设置会立即应用到 CalendarMark 的所有界面。" /><div className="theme-options"><ThemeOption icon={<Sun size={18} />} title="浅色" description="干净明亮的纸张感" active={settings.theme === 'light'} onClick={() => update({ theme: 'light' })} /><ThemeOption icon={<Moon size={18} />} title="深色" description="夜间记录更舒适" active={settings.theme === 'dark'} onClick={() => update({ theme: 'dark' })} /><ThemeOption icon={<Monitor size={18} />} title="跟随系统" description="随系统自动切换" active={settings.theme === 'auto'} onClick={() => update({ theme: 'auto' })} /></div><div className="preference-card"><div className="preference-row"><div className="preference-copy"><strong>启动时显示上次浏览的月份</strong><span>下次打开时保留你的浏览上下文</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div><div className="preference-row"><div className="preference-copy"><strong>关闭窗口时保留在托盘</strong><span>点击右上角关闭只隐藏窗口，不退出应用</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div></div></>}
         {settingsSection === 'tags' && <><SettingsTitle icon={<TagIcon size={18} />} eyebrow="标签管理" title="让标签替你整理生活的纹理" description="快捷标签会显示在日历格子和记录抽屉里。" /><div className="tag-manager-card"><div className="tag-manager-header"><div><strong>我的标签</strong><span>{tags.length} 个标签</span></div><form className="tag-add-form" onSubmit={submitTag}><input aria-label="标签名称" placeholder="输入新标签" value={newTag} onChange={(event) => setNewTag(event.target.value)} /><button type="submit" aria-label="添加标签"><Plus size={16} /></button></form></div><div className="managed-tags">{tags.map((tag) => <div className="managed-tag" key={tag.id}><span className={`tag-dot tag-dot--${tag.color}`} /><span>{tag.name}</span><span className="managed-tag-count">快捷标签</span><button className="plain-icon-button" aria-label={`删除 ${tag.name}`} onClick={() => onDeleteTag(tag.id)}><Trash2 size={14} /></button></div>)}</div></div><div className="info-banner info-banner--warm"><Hash size={16} /><span>小建议：保持标签在 3–8 个之间，日历会更清晰，也更容易回顾。</span></div></>}
       </section>
     </div>
   </div>
+}
+
+function DataSourceSettings({ settings, onChangeSettings, onNotice }: { settings: AppSettings; onChangeSettings: (settings: AppSettings) => void; onNotice: (message: string) => void }) {
+  const selectedSource = DATA_SOURCE_DEFINITIONS.find((source) => source.id === settings.dataSource) ?? DATA_SOURCE_DEFINITIONS[0]
+  const update = (partial: Partial<AppSettings>) => onChangeSettings({ ...settings, ...partial })
+
+  function statusLabel(status: typeof selectedSource.status): string {
+    if (status === 'active') return '可用'
+    if (status === 'preview') return '配置预览'
+    return '规划中'
+  }
+
+  return <>
+    <SettingsTitle icon={<Database size={18} />} eyebrow="数据源" title="选择可以替换的数据来源" description="CalendarMark 用统一的数据源入口承载不同连接方式；当前先把 Notion 适配器和本地存储整理好，后续可以继续加入更多 provider。" />
+    <div className="source-selector-grid" aria-label="数据源选择">
+      {DATA_SOURCE_DEFINITIONS.map((source) => {
+        const isActive = selectedSource.id === source.id
+        const isDisabled = source.status === 'planned'
+        return <button key={source.id} type="button" className={`source-selector ${isActive ? 'source-selector--active' : ''} ${isDisabled ? 'source-selector--disabled' : ''}`} disabled={isDisabled} onClick={() => {
+          if (isDisabled) {
+            onNotice(`${source.label} 数据源将在后续版本开放`)
+            return
+          }
+          update({ dataSource: source.id })
+        }}>
+          <span className={`source-selector-icon source-selector-icon--${source.id}`}><DataSourceIcon id={source.id} /></span>
+          <span className="source-selector-copy"><strong>{source.label}</strong><small>{source.description} · {source.detail}</small></span>
+          <span className={`source-selector-state source-selector-state--${source.status}`}>{isActive ? '当前' : statusLabel(source.status)}</span>
+        </button>
+      })}
+    </div>
+    {selectedSource.id === 'notion' && <NotionSourceSettings settings={settings} onChangeSettings={onChangeSettings} onNotice={onNotice} />}
+    {selectedSource.id === 'local' && <LocalSourceSettings onSelectNotion={() => update({ dataSource: 'notion' })} />}
+    {selectedSource.status === 'planned' && <PlannedSourceSettings sourceId={selectedSource.id} />}
+  </>
+}
+
+function DataSourceIcon({ id }: { id: DataSourceId }) {
+  if (id === 'local') return <HardDrive size={17} />
+  if (id === 'webdav') return <Cloud size={17} />
+  if (id === 'obsidian') return <BookOpen size={17} />
+  return <Database size={17} />
+}
+
+function NotionSourceSettings({ settings, onChangeSettings, onNotice }: { settings: AppSettings; onChangeSettings: (settings: AppSettings) => void; onNotice: (message: string) => void }) {
+  const isConfigured = Boolean(settings.notionToken.trim() && settings.notionDatabaseId.trim())
+  const update = (partial: Partial<AppSettings>) => onChangeSettings({ ...settings, ...partial })
+
+  return <>
+    <div className="source-card source-card--notion">
+      <div className="source-card-top"><div className="notion-logo">N</div><div><strong>Notion</strong><span>首个外部数据源 · 先完成连接配置</span></div><span className="connection-badge"><span className={`status-dot ${isConfigured ? 'status-dot--ready' : 'status-dot--muted'}`} />{isConfigured ? '已填写配置' : '待配置'}</span></div>
+      <div className="source-divider" />
+      <div className="source-fields">
+        <label className="field-label" htmlFor="notion-token"><span>Integration Token</span><span className="field-hint"><KeyRound size={12} />仅保存在本机</span></label>
+        <input id="notion-token" className="settings-input" type="password" placeholder="secret_… 或 ntn_…" value={settings.notionToken} onChange={(event) => update({ notionToken: event.target.value })} />
+        <label className="field-label" htmlFor="notion-database"><span>Database ID</span><span className="field-hint"><Link2 size={12} />从数据库链接中复制</span></label>
+        <input id="notion-database" className="settings-input" placeholder="32 位 Database ID" value={settings.notionDatabaseId} onChange={(event) => update({ notionDatabaseId: event.target.value })} />
+      </div>
+      <div className="source-card-footer"><span><Cloud size={15} />真实同步适配器将在后续版本接入</span><button type="button" className="secondary-button" onClick={() => onNotice(isConfigured ? '配置已保存，Notion 同步适配器待接入' : '请先填写 Token 和 Database ID')}><RefreshCw size={15} />检查配置</button></div>
+    </div>
+    <NotionSetupGuide />
+    <div className="info-banner"><Sparkles size={16} /><span><strong>数据映射建议：</strong>Notion 数据库至少包含 Date、Title、Content 和 Tags 属性。当前版本先保存连接配置，真实读写同步将在适配器接入后启用。</span></div>
+  </>
+}
+
+function NotionSetupGuide() {
+  return <section className="notion-guide" aria-labelledby="notion-guide-title">
+    <div className="notion-guide-header"><div><span className="eyebrow">连接引导</span><h3 id="notion-guide-title">3 步准备好 Notion 信息</h3><p>Token 是连接密钥，Database ID 用来告诉 CalendarMark 要读取哪一个数据库。</p></div><a className="guide-link" href="https://developers.notion.com/guides/get-started/quick-start" target="_blank" rel="noreferrer">官方文档 <ExternalLink size={13} /></a></div>
+    <div className="notion-guide-steps">
+      <div className="notion-guide-step"><span className="notion-guide-number">1</span><div><strong>创建 Internal connection</strong><p>打开 Notion Integrations，在 Build 中创建 Internal connection，然后进入 Configuration 复制 Installation access token。</p><a className="guide-link guide-link--inline" href="https://www.notion.so/my-integrations" target="_blank" rel="noreferrer">打开 Notion Integrations <ExternalLink size={12} /></a></div></div>
+      <div className="notion-guide-step"><span className="notion-guide-number">2</span><div><strong>把目标数据库分享给连接</strong><p>打开目标数据库右上角的 <b>•••</b>，选择 Add connections，搜索刚创建的连接并确认。没有这一步，API 无法访问数据库。</p></div></div>
+      <div className="notion-guide-step"><span className="notion-guide-number">3</span><div><strong>复制 Database ID</strong><p>将数据库作为整页打开，点击 Share → Copy link。复制 URL 中 workspace 后、<code>?v=</code> 前的 32 位字符串。</p><code className="notion-url-example">https://www.notion.so/workspace/<b>database_id</b>?v=view_id</code></div></div>
+    </div>
+    <div className="notion-guide-note"><KeyRound size={14} /><span>不要把 Token 发给别人、放进截图或提交到 Git；当前 MVP 只在本机保存配置。一个数据库包含多个 data source 时，后续同步适配器还会从 Database ID 继续发现对应的 data source ID。</span></div>
+  </section>
+}
+
+function LocalSourceSettings({ onSelectNotion }: { onSelectNotion: () => void }) {
+  return <div className="source-card source-card--local">
+    <div className="source-card-top"><div className="source-placeholder-icon"><HardDrive size={18} /></div><div><strong>本地存储</strong><span>离线优先的数据来源</span></div><span className="connection-badge"><span className="status-dot status-dot--ready" />可用</span></div>
+    <div className="source-divider" />
+    <div className="local-source-body"><p>记录会继续保存在当前设备，适合不需要云端同步的使用方式。切换到本地存储不会删除已填写的 Notion 配置。</p><div className="local-source-points"><span><Check size={14} />离线可用</span><span><Check size={14} />无需账号</span><span><Check size={14} />即时保存</span></div></div>
+    <div className="source-card-footer"><span><Database size={15} />想跨设备同步？可以切换回 Notion</span><button type="button" className="secondary-button" onClick={onSelectNotion}><Database size={15} />配置 Notion</button></div>
+  </div>
+}
+
+function PlannedSourceSettings({ sourceId }: { sourceId: DataSourceId }) {
+  const source = DATA_SOURCE_DEFINITIONS.find((item) => item.id === sourceId)
+  if (!source) return null
+  return <div className="source-card source-card--planned"><div className="source-card-top"><div className="source-placeholder-icon"><DataSourceIcon id={source.id} /></div><div><strong>{source.label}</strong><span>{source.description}</span></div><span className="connection-badge">规划中</span></div><div className="source-divider" /><div className="planned-source-body"><Sparkles size={17} /><p>{source.label} 会沿用统一的数据源接口，连接设置和同步策略将在后续版本开放。</p></div></div>
 }
 
 function SettingsTitle({ icon, eyebrow, title, description }: { icon: ReactNode; eyebrow: string; title: string; description: string }) {

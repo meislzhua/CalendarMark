@@ -64,7 +64,15 @@ CalendarMark
 
 ### Notion
 
-首个数据源只考虑 Notion。建议映射如下：
+数据源设置不把 Notion 写死为唯一选项，而是使用可替换的数据源选择器。当前提供：
+
+- **Notion**：首个外部数据源，当前为配置预览状态。
+- **本地存储**：当前可用，适合离线记录。
+- **WebDAV / Obsidian Vault**：展示为规划中的数据源，暂不允许连接。
+
+选择 Notion 后，页面内提供三步连接引导：创建 Internal connection 并复制 token、将目标数据库通过 Add connections 分享给连接、从数据库分享链接中提取 Database ID。Token 不应被截图或提交到版本库。
+
+建议映射如下：
 
 | CalendarMark | Notion 属性 | 类型 |
 | --- | --- | --- |
@@ -74,7 +82,7 @@ CalendarMark
 | `tagIds` | Tags | multi_select |
 | `attachments` | Attachments | files / URL |
 
-MVP 先保存 Token 和 Database ID 配置，不在前端直连 Notion，避免令牌暴露在 WebView 和浏览器网络层。
+MVP 先保存 Token 和 Database ID 配置，不在前端直连 Notion，避免令牌暴露在 WebView 和浏览器网络层。真实同步时还需要根据 Database ID 发现对应的 data source ID。
 
 ## 6. 非目标（MVP 不做）
 
@@ -91,6 +99,6 @@ MVP 先保存 Token 和 Database ID 配置，不在前端直连 Notion，避免�
 - [x] 标签创建、选择、删除。
 - [x] 图片和文档附件加入草稿。
 - [x] 右侧抽屉带打开/关闭动画。
-- [x] 设置页包含 Notion、快捷键、界面、标签管理。
+- [x] 设置页包含可替换数据源选择器、Notion 引导、快捷键、界面、标签管理。
 - [x] Tauri 托盘、关闭隐藏、桌面快捷键桥接。
 - [x] GitHub Actions 覆盖 Windows、macOS、Android 构建入口。

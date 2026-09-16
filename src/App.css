@@ -1407,6 +1407,120 @@ input::placeholder {
   overflow: hidden;
 }
 
+.source-selector-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.source-selector {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  text-align: left;
+  transition: border-color .18s ease, background .18s ease, transform .18s ease, box-shadow .18s ease;
+}
+
+.source-selector:not(:disabled) {
+  cursor: pointer;
+}
+
+.source-selector:not(:disabled):hover {
+  border-color: #bad4c2;
+  box-shadow: 0 5px 16px rgba(61, 78, 66, .06);
+  transform: translateY(-1px);
+}
+
+.source-selector--active {
+  border-color: #a9ccb6;
+  background: var(--green-tint);
+  box-shadow: inset 0 0 0 1px rgba(84, 145, 105, .06);
+}
+
+.source-selector--disabled {
+  cursor: not-allowed;
+  opacity: .62;
+}
+
+.source-selector-icon,
+.source-placeholder-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--surface-muted);
+  color: var(--ink-muted);
+}
+
+.source-selector--active .source-selector-icon {
+  background: var(--green-soft);
+  color: var(--green-deep);
+}
+
+.source-selector-icon--notion {
+  border: 1px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+}
+
+.source-selector-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.source-selector-copy strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-selector-copy small {
+  overflow: hidden;
+  color: var(--ink-faint);
+  font-size: 9px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-selector-state {
+  align-self: start;
+  border-radius: 999px;
+  padding: 4px 6px;
+  color: var(--ink-faint);
+  font-size: 8px;
+  white-space: nowrap;
+}
+
+.source-selector-state--active,
+.source-selector--active .source-selector-state {
+  background: #e2f0e6;
+  color: var(--green-deep);
+}
+
+.source-selector-state--preview {
+  background: #f5eadb;
+  color: #9c6c49;
+}
+
+.source-selector-state--planned {
+  background: var(--surface-muted);
+}
+
 .source-card-top {
   display: flex;
   align-items: center;
@@ -1508,6 +1622,190 @@ input::placeholder {
   gap: 6px;
   color: var(--ink-faint);
   font-size: 10px;
+}
+
+.source-placeholder-icon {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.local-source-body,
+.planned-source-body {
+  padding: 17px 21px 19px;
+}
+
+.local-source-body p,
+.planned-source-body p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.local-source-points {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 15px;
+}
+
+.local-source-points span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--green-deep);
+  font-size: 10px;
+}
+
+.planned-source-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: #a77859;
+}
+
+.planned-source-body svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.notion-guide {
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 20px 16px;
+  background: var(--surface);
+}
+
+.notion-guide-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 15px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid var(--line);
+}
+
+.notion-guide-header h3 {
+  margin: 5px 0 4px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -.025em;
+}
+
+.notion-guide-header p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.guide-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  color: var(--green-deep);
+  font-size: 10px;
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.guide-link:hover {
+  color: var(--green);
+  text-decoration: underline;
+}
+
+.guide-link--inline {
+  margin-top: 7px;
+  font-size: 9px;
+}
+
+.notion-guide-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 13px;
+  padding: 17px 0 16px;
+}
+
+.notion-guide-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+
+.notion-guide-number {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--green-soft);
+  color: var(--green-deep);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.notion-guide-step strong {
+  display: block;
+  margin: 2px 0 5px;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.notion-guide-step p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+.notion-guide-step b {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.notion-guide-step code {
+  display: block;
+  overflow-wrap: anywhere;
+  margin-top: 7px;
+  color: var(--ink-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.notion-url-example {
+  border-radius: 5px;
+  padding: 5px 6px;
+  background: var(--surface-muted);
+}
+
+.notion-url-example b {
+  color: var(--green-deep);
+  font-weight: 700;
+}
+
+.notion-guide-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  color: var(--ink-faint);
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+.notion-guide-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #aa7858;
 }
 
 .info-banner {
@@ -1950,6 +2248,19 @@ input::placeholder {
 
   .source-fields {
     grid-template-columns: 1fr;
+  }
+
+  .source-selector-grid,
+  .notion-guide-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .notion-guide-header {
+    flex-direction: column;
+  }
+
+  .notion-guide-header .guide-link {
+    align-self: flex-start;
   }
 
   .source-fields .field-label:nth-of-type(2),
