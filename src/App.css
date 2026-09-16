@@ -2668,3 +2668,54 @@ input::placeholder {
   font-size: 10px;
 }
 
+
+/* --- 系统设置：快捷键录制 --- */
+
+button.toggle-switch {
+  border: 0;
+  cursor: pointer;
+  flex: none;
+}
+
+button.toggle-switch:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.shortcut-recorder {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.shortcut-recording-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 13px;
+  border: 1px dashed var(--green);
+  border-radius: 8px;
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.shortcut-capture-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.shortcut-current {
+  min-width: 86px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 650;
+  text-align: center;
+}

@@ -1,5 +1,6 @@
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { disable, enable, isEnabled } from '@tauri-apps/plugin-autostart'
 import {
   register,
   unregister,
@@ -65,5 +66,30 @@ export async function listenForSettingsOpen(
     return await listen('calendar-mark:open-settings', onOpen)
   } catch {
     return () => undefined
+  }
+}
+
+export async function readAutostartEnabled(): Promise<boolean | null> {
+  if (!isDesktopTauriRuntime()) return null
+
+  try {
+    return await isEnabled()
+  } catch {
+    return null
+  }
+}
+
+export async function setAutostartEnabled(enabled: boolean): Promise<boolean> {
+  if (!isDesktopTauriRuntime()) return false
+
+  try {
+    if (enabled) {
+      await enable()
+    } else {
+      await disable()
+    }
+    return (await isEnabled()) === enabled
+  } catch {
+    return false
   }
 }

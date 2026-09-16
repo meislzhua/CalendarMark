@@ -32,6 +32,9 @@ pub fn run() {
                 _app.handle()
                     .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
 
+                _app.handle()
+                    .plugin(tauri_plugin_autostart::Builder::new().build())?;
+
                 let show_item =
                     MenuItem::with_id(_app, "show", "打开 CalendarMark", true, None::<&str>)?;
                 let settings_item =

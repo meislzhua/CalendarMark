@@ -25,6 +25,7 @@ import {
   MoreHorizontal,
   PanelRightClose,
   Palette,
+  Power,
   Plus,
   RefreshCw,
   Save,
@@ -65,6 +66,8 @@ import {
   saveTags,
 } from './storage'
 import {
+  readAutostartEnabled,
+  setAutostartEnabled,
   isDesktopTauriRuntime,
   listenForSettingsOpen,
   registerGlobalShortcut,
@@ -85,7 +88,7 @@ import type {
 } from './notion'
 
 type View = 'calendar' | 'settings'
-type SettingsSection = 'source' | 'shortcut' | 'interface' | 'tags'
+type SettingsSection = 'source' | 'system' | 'interface' | 'tags'
 
 type CalendarCell = {
   date: Date
@@ -766,7 +769,7 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
   const [newTag, setNewTag] = useState('')
   const sections: { id: SettingsSection; label: string; description: string; icon: typeof Database }[] = [
     { id: 'source', label: '数据源', description: '选择数据来源', icon: Database },
-    { id: 'shortcut', label: '快捷键', description: '随时打开窗口', icon: Keyboard },
+    { id: 'system', label: '系统', description: '启动与快捷键', icon: Power },
     { id: 'interface', label: '界面', description: '调整显示方式', icon: Palette },
     { id: 'tags', label: '标签管理', description: '整理你的分类', icon: TagIcon },
   ]
@@ -788,12 +791,180 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
       </nav>
       <section className="settings-content">
         {settingsSection === 'source' && <DataSourceSettings settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} onReloadRemote={onReloadRemote} />}
-        {settingsSection === 'shortcut' && <><SettingsTitle icon={<Keyboard size={18} />} eyebrow="快捷键" title="不用打断思路，就能打开记录窗口" description="桌面版会在启动时注册全局快捷键；浏览器预览不会抢占系统快捷键。" /><div className="preference-card"><div className="preference-row"><div className="preference-copy"><strong>打开 CalendarMark</strong><span>建议使用不容易和其他软件冲突的组合键</span></div><div className="shortcut-input-wrap"><Command size={15} /><input aria-label="全局快捷键" value={settings.shortcut} onChange={(event) => update({ shortcut: event.target.value })} /></div></div><div className="preference-row preference-row--subtle"><span className="connection-badge connection-badge--plain"><span className={`status-dot ${shortcutState === 'error' ? 'status-dot--error' : ''}`} />{shortcutState === 'ready' ? '桌面快捷键已注册' : shortcutState === 'error' ? '快捷键注册失败，请更换组合' : '浏览器预览模式'}</span><button className="text-button" onClick={() => update({ shortcut: DEFAULT_SETTINGS.shortcut })}>恢复默认</button></div></div><div className="shortcut-preview"><div className="shortcut-preview-icon"><Zap size={18} /></div><div><strong>快速记录的节奏</strong><p>按下快捷键后，CalendarMark 会显示主窗口；再点击某一天即可打开右侧记录抽屉。</p></div><kbd>{settings.shortcut.replace('CommandOrControl', 'Ctrl')}</kbd></div></>}
+        {settingsSection === 'system' && <SystemSettings settings={settings} onChangeSettings={onChangeSettings} shortcutState={shortcutState} onNotice={onNotice} />}
         {settingsSection === 'interface' && <><SettingsTitle icon={<Palette size={18} />} eyebrow="界面" title="选择让你感觉舒服的明暗" description="主题设置会立即应用到 CalendarMark 的所有界面。" /><div className="theme-options"><ThemeOption icon={<Sun size={18} />} title="浅色" description="干净明亮的纸张感" active={settings.theme === 'light'} onClick={() => update({ theme: 'light' })} /><ThemeOption icon={<Moon size={18} />} title="深色" description="夜间记录更舒适" active={settings.theme === 'dark'} onClick={() => update({ theme: 'dark' })} /><ThemeOption icon={<Monitor size={18} />} title="跟随系统" description="随系统自动切换" active={settings.theme === 'auto'} onClick={() => update({ theme: 'auto' })} /></div><div className="preference-card"><div className="preference-row"><div className="preference-copy"><strong>启动时显示上次浏览的月份</strong><span>下次打开时保留你的浏览上下文</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div><div className="preference-row"><div className="preference-copy"><strong>关闭窗口时保留在托盘</strong><span>点击右上角关闭只隐藏窗口，不退出应用</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div></div></>}
         {settingsSection === 'tags' && <><SettingsTitle icon={<TagIcon size={18} />} eyebrow="标签管理" title="让标签替你整理生活的纹理" description="快捷标签会显示在日历格子和记录抽屉里。" /><div className="tag-manager-card"><div className="tag-manager-header"><div><strong>我的标签</strong><span>{tags.length} 个标签</span></div><form className="tag-add-form" onSubmit={submitTag}><input aria-label="标签名称" placeholder="输入新标签" value={newTag} onChange={(event) => setNewTag(event.target.value)} /><button type="submit" aria-label="添加标签"><Plus size={16} /></button></form></div><div className="managed-tags">{tags.map((tag) => <div className="managed-tag" key={tag.id}><span className={`tag-dot tag-dot--${tag.color}`} /><span>{tag.name}</span><span className="managed-tag-count">快捷标签</span><button className="plain-icon-button" aria-label={`删除 ${tag.name}`} onClick={() => onDeleteTag(tag.id)}><Trash2 size={14} /></button></div>)}</div></div><div className="info-banner info-banner--warm"><Hash size={16} /><span>小建议：保持标签在 3–8 个之间，日历会更清晰，也更容易回顾。</span></div></>}
       </section>
     </div>
   </div>
+}
+
+type SystemSettingsProps = {
+  settings: AppSettings
+  onChangeSettings: Dispatch<SetStateAction<AppSettings>>
+  shortcutState: 'ready' | 'browser' | 'error'
+  onNotice: (message: string) => void
+}
+
+type AutostartState = 'checking' | 'on' | 'off' | 'unsupported' | 'error'
+
+function normalizeShortcutKey(event: KeyboardEvent): string | null {
+  const { code, key } = event
+  if (code.startsWith('Key') && code.length === 4) return code.slice(3)
+  if (code.startsWith('Digit') && code.length === 6) return code.slice(5)
+  const codeMap: Record<string, string> = {
+    Space: 'Space',
+    Comma: 'Comma',
+    Period: 'Period',
+    Slash: 'Slash',
+    Backquote: 'Backquote',
+    Tab: 'Tab',
+    Enter: 'Enter',
+    ArrowUp: 'Up',
+    ArrowDown: 'Down',
+    ArrowLeft: 'Left',
+    ArrowRight: 'Right',
+    BracketLeft: 'BracketLeft',
+    BracketRight: 'BracketRight',
+    Semicolon: 'Semicolon',
+    Quote: 'Quote',
+    Backslash: 'Backslash',
+    Minus: 'Minus',
+    Equal: 'Equal',
+  }
+  if (codeMap[code]) return codeMap[code]
+  if (/^F([1-9]|1[0-2])$/.test(key)) return key
+  return null
+}
+
+function formatShortcutFromEvent(event: KeyboardEvent): string | null {
+  if (['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) return null
+  const key = normalizeShortcutKey(event)
+  if (!key) return null
+  // 全局快捷键至少需要一个主修饰键，避免抢占普通按键输入。
+  if (!event.ctrlKey && !event.metaKey && !event.altKey) return null
+  const parts: string[] = []
+  if (event.ctrlKey || event.metaKey) parts.push('CommandOrControl')
+  if (event.altKey) parts.push('Alt')
+  if (event.shiftKey) parts.push('Shift')
+  parts.push(key)
+  return parts.join('+')
+}
+
+function displayShortcut(shortcut: string): string {
+  return shortcut.replace('CommandOrControl', 'Ctrl')
+}
+
+function SystemSettings({ settings, onChangeSettings, shortcutState, onNotice }: SystemSettingsProps) {
+  const [autostartState, setAutostartState] = useState<AutostartState>('checking')
+  const [autostartBusy, setAutostartBusy] = useState(false)
+  const [recording, setRecording] = useState(false)
+  const [captured, setCaptured] = useState('')
+  const update = (partial: Partial<AppSettings>) => onChangeSettings((previous) => ({ ...previous, ...partial }))
+
+  useEffect(() => {
+    let cancelled = false
+    void readAutostartEnabled().then((enabled) => {
+      if (cancelled) return
+      setAutostartState(enabled === null ? 'unsupported' : enabled ? 'on' : 'off')
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!recording) return undefined
+    const onKeyDown = (event: KeyboardEvent) => {
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.key === 'Escape') {
+        setRecording(false)
+        setCaptured('')
+        return
+      }
+      const combo = formatShortcutFromEvent(event)
+      if (combo) {
+        setCaptured(combo)
+        setRecording(false)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [recording])
+
+  async function toggleAutostart() {
+    if (autostartBusy || autostartState === 'checking' || autostartState === 'unsupported') return
+    const next = autostartState !== 'on'
+    setAutostartBusy(true)
+    const ok = await setAutostartEnabled(next)
+    setAutostartBusy(false)
+    if (ok) {
+      setAutostartState(next ? 'on' : 'off')
+      onNotice(next ? '已开启开机启动' : '已关闭开机启动')
+    } else {
+      setAutostartState('error')
+      onNotice('设置开机启动失败，请检查系统权限后重试')
+    }
+  }
+
+  function applyCapturedShortcut() {
+    if (!captured) return
+    update({ shortcut: captured })
+    onNotice(`快捷键已更新：${displayShortcut(captured)}`)
+    setCaptured('')
+  }
+
+  const autostartLabel = autostartState === 'checking'
+    ? '正在读取系统设置…'
+    : autostartState === 'on'
+      ? '已开启'
+      : autostartState === 'unsupported'
+        ? '浏览器 / 移动端不支持'
+        : autostartState === 'error'
+          ? '设置失败'
+          : '已关闭'
+
+  return <>
+    <SettingsTitle icon={<Power size={18} />} eyebrow="系统" title="控制 CalendarMark 的启动方式" description="开机启动和全局快捷键只在桌面版生效；浏览器预览不会抢占系统设置。" />
+    <div className="preference-card">
+      <div className="preference-row">
+        <div className="preference-copy"><strong>开机启动</strong><span>登录系统后自动运行 CalendarMark 并驻留托盘</span></div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autostartState === 'on'}
+          aria-label="开机启动"
+          className={`toggle-switch ${autostartState === 'on' ? 'toggle-switch--on' : ''}`}
+          disabled={autostartState === 'checking' || autostartState === 'unsupported' || autostartBusy}
+          onClick={() => { void toggleAutostart() }}
+        ><span /></button>
+      </div>
+      <div className="preference-row preference-row--subtle">
+        <span className="connection-badge connection-badge--plain"><span className={`status-dot ${autostartState === 'error' ? 'status-dot--error' : ''}`} />{autostartLabel}</span>
+        <span className="field-hint">通过系统注册表 / Launch Agent 管理，卸载应用后自动清理</span>
+      </div>
+    </div>
+    <div className="preference-card">
+      <div className="preference-row">
+        <div className="preference-copy"><strong>打开 CalendarMark</strong><span>点击“读取组合键”后直接按下想要的按键组合</span></div>
+        <div className="shortcut-recorder">
+          {recording
+            ? <span className="shortcut-recording-hint"><Keyboard size={15} />按下组合键，Esc 取消</span>
+            : <button type="button" className="secondary-button" onClick={() => { setCaptured(''); setRecording(true) }}><Keyboard size={15} />读取组合键</button>}
+        </div>
+      </div>
+      <div className="preference-row preference-row--subtle">
+        <span className="connection-badge connection-badge--plain"><span className={`status-dot ${shortcutState === 'error' ? 'status-dot--error' : ''}`} />{shortcutState === 'ready' ? '桌面快捷键已注册' : shortcutState === 'error' ? '快捷键注册失败，请更换组合' : '浏览器预览模式'}</span>
+        <div className="shortcut-capture-actions">
+          <kbd className="shortcut-current">{displayShortcut(captured || settings.shortcut)}</kbd>
+          {captured && captured !== settings.shortcut && <><button type="button" className="primary-button" onClick={applyCapturedShortcut}>应用</button><button type="button" className="text-button" onClick={() => setCaptured('')}>放弃</button></>}
+          {!captured && settings.shortcut !== DEFAULT_SETTINGS.shortcut && <button className="text-button" onClick={() => update({ shortcut: DEFAULT_SETTINGS.shortcut })}>恢复默认</button>}
+        </div>
+      </div>
+    </div>
+    <div className="shortcut-preview"><div className="shortcut-preview-icon"><Zap size={18} /></div><div><strong>快速记录的节奏</strong><p>按下快捷键后，CalendarMark 会显示主窗口；再点击某一天即可打开右侧记录抽屉。</p></div><kbd>{displayShortcut(settings.shortcut)}</kbd></div>
+  </>
 }
 
 function DataSourceSettings({ settings, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onNotice, onReloadRemote }: { settings: AppSettings; onChangeSettings: Dispatch<SetStateAction<AppSettings>>; entries: CalendarEntry[]; onChangeEntries: (entries: CalendarEntry[]) => void; tags: Tag[]; onChangeTags: (tags: Tag[]) => void; onNotice: (message: string) => void; onReloadRemote: () => void }) {
