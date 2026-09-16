@@ -7,6 +7,32 @@ use tauri::{
 
 mod notion;
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowWorkArea {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[tauri::command]
+fn get_window_work_area(
+    window: tauri::WebviewWindow,
+) -> Result<WindowWorkArea, String> {
+    let monitor = window
+        .current_monitor()
+        .map_err(|error| format!("无法读取当前显示器：{error}"))?
+        .ok_or_else(|| "没有检测到当前显示器。".to_string())?;
+    let area = monitor.work_area();
+    Ok(WindowWorkArea {
+        x: area.position.x,
+        y: area.position.y,
+        width: area.size.width,
+        height: area.size.height,
+    })
+}
+
 #[cfg(desktop)]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -24,7 +50,9 @@ pub fn run() {
             notion::notion_check_connection,
             notion::notion_pull_entries,
             notion::notion_push_entries,
-            notion::notion_archive_page
+            notion::notion_archive_page,
+=======
+            get_window_work_area
         ])
         .setup(|_app| {
             #[cfg(desktop)]
@@ -78,3 +106,5 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running CalendarMark");
 }
+
+

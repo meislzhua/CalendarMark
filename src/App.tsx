@@ -68,12 +68,15 @@ import {
   saveTags,
 } from './storage'
 import {
+  applyUiMode,
   readAutostartEnabled,
   setAutostartEnabled,
+  hideMainWindow,
   isDesktopTauriRuntime,
   listenForSettingsOpen,
+  onWindowFocusChanged,
   registerGlobalShortcut,
-  showMainWindow,
+  toggleMainWindow,
 } from './tauri'
 import {
   archiveNotionPage,
@@ -207,6 +210,7 @@ function App() {
   const [draft, setDraft] = useState<CalendarEntry>(() => createDraft(today))
   const [newTagName, setNewTagName] = useState('')
   const [tagManageMode, setTagManageMode] = useState(false)
+  const [drawerSlideIn, setDrawerSlideIn] = useState(true)
   const [shortcutState, setShortcutState] = useState<'ready' | 'browser' | 'error'>('browser')
   const [notice, setNotice] = useState('')
   const [remoteDataState, setRemoteDataState] = useState<RemoteDataState>(settings.dataSource === 'notion' ? 'needs-config' : 'local')
@@ -311,12 +315,38 @@ function App() {
     document.documentElement.dataset.theme = isDark ? 'dark' : 'light'
   }, [settings.theme])
 
+  // 应用界面模式：抽屉模式切换为贴屏幕右侧的无边框窄窗口，窗口模式恢复常规窗口。
+  useEffect(() => {
+    document.documentElement.dataset.uiMode = settings.uiMode
+    void applyUiMode(settings.uiMode)
+  }, [settings.uiMode])
+
+  // 抽屉模式：窗口重新显示/聚焦时重放滑入动效。
+  useEffect(() => {
+    if (settings.uiMode !== 'drawer') return undefined
+    let cancelled = false
+    let dispose: (() => void) | undefined
+    void onWindowFocusChanged((focused) => {
+      if (!focused) return
+      setDrawerSlideIn(false)
+      window.requestAnimationFrame(() => setDrawerSlideIn(true))
+    }).then((fn) => {
+      if (cancelled) fn()
+      else dispose = fn
+    })
+    return () => {
+      cancelled = true
+      dispose?.()
+    }
+  }, [settings.uiMode])
+
   useEffect(() => {
     let cancelled = false
     void registerGlobalShortcut(settings.shortcut, () => {
       setView('calendar')
       setDrawerOpen(false)
-      void showMainWindow()
+      // 已聚焦时收起窗口；未聚焦或隐藏时显示并聚焦
+      void toggleMainWindow()
     }).then((result) => {
       if (cancelled) return
       setShortcutState(!isDesktopTauriRuntime() ? 'browser' : result.ok ? 'ready' : 'error')
@@ -538,7 +568,13 @@ function App() {
             : '直接写入'
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${settings.uiMode === 'drawer' && drawerSlideIn ? 'app-shell--slide-in' : ''}`}>
+      {settings.uiMode === 'drawer' && (
+        <div className="drawer-drag-region" data-tauri-drag-region>
+          <span data-tauri-drag-region>CalendarMark</span>
+          <button type="button" className="plain-icon-button" aria-label="收起抽屉" title="收起到托盘" onClick={() => { void hideMainWindow() }}><PanelRightClose size={16} /></button>
+        </div>
+      )}
       <aside className="sidebar">
         <div className="brand-lockup">
           <div className="brand-mark"><span>CM</span></div>
