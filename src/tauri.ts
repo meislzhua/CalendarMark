@@ -2,6 +2,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { LogicalPosition, LogicalSize } from '@tauri-apps/api/dpi'
 import { invoke } from '@tauri-apps/api/core'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import type { UiMode } from './types'
 import { disable, enable, isEnabled } from '@tauri-apps/plugin-autostart'
 import {
@@ -19,6 +20,8 @@ export const isTauriRuntime = (): boolean => Boolean(window.__TAURI_INTERNALS__)
 export const isDesktopTauriRuntime = (): boolean => isTauriRuntime() && !/Android|iPhone|iPad/i.test(navigator.userAgent)
 
 let registeredShortcut: string | null = null
+let registeredHandler: (() => void) | null = null
+let registrationQueue: Promise<{ ok: boolean; error?: string }> = Promise.resolve({ ok: true })
 
 export async function showMainWindow(): Promise<void> {
   if (!isDesktopTauriRuntime()) return
@@ -51,6 +54,17 @@ export async function hideMainWindow(): Promise<void> {
   await getCurrentWindow().hide()
 }
 
+export async function openInExternalBrowser(url: string): Promise<boolean> {
+  if (!isTauriRuntime()) return false
+
+  try {
+    await openUrl(url)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export async function onWindowFocusChanged(handler: (focused: boolean) => void): Promise<() => void> {
   if (!isDesktopTauriRuntime()) return () => undefined
   try {
@@ -67,21 +81,35 @@ export async function registerGlobalShortcut(
 ): Promise<{ ok: boolean; error?: string }> {
   if (!isDesktopTauriRuntime()) return { ok: true }
 
-  try {
-    if (registeredShortcut && registeredShortcut !== shortcut) {
-      await unregister(registeredShortcut)
+  // 回调只更新引用，快捷键不变时无需重新注册。
+  registeredHandler = onPressed
+  if (registeredShortcut === shortcut) return { ok: true }
+
+  // React StrictMode 和快速连续修改会并发触发注册；
+  // 用串行队列保证 注销 → 注册 的顺序，避免竞态导致注册失败或状态错乱。
+  registrationQueue = registrationQueue.then(async () => {
+    try {
+      if (registeredShortcut && registeredShortcut !== shortcut) {
+        try {
+          await unregister(registeredShortcut)
+        } catch {
+          // 旧快捷键可能已被系统注销，忽略后继续注册新的
+        }
+        registeredShortcut = null
+      }
+      if (!registeredShortcut) {
+        await register(shortcut, (event) => {
+          if (event.state === 'Pressed') registeredHandler?.()
+        })
+        registeredShortcut = shortcut
+      }
+      return { ok: true }
+    } catch (error) {
       registeredShortcut = null
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
-    if (!registeredShortcut) {
-      await register(shortcut, (event) => {
-        if (event.state === 'Pressed') onPressed()
-      })
-      registeredShortcut = shortcut
-    }
-    return { ok: true }
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) }
-  }
+  })
+  return registrationQueue
 }
 
 export async function listenForSettingsOpen(

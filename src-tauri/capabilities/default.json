@@ -24,6 +24,7 @@
     "core:window:allow-set-decorations",
     "core:window:allow-set-min-size",
     "core:window:allow-center",
+    "opener:allow-open-url",
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled"
