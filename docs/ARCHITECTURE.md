@@ -59,7 +59,9 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 
 设置页分为数据源、系统、界面和标签管理四个分区。系统设置包含开机启动开关（autostart 插件）和全局快捷键；快捷键通过“读取组合键”按钮捕获下一次按键组合生成 Tauri accelerator（至少需要一个 Ctrl/Cmd/Alt 修饰键，Esc 取消），不再依赖手工输入。日历总览工具栏在远程直连模式下提供刷新按钮，等价于设置页的“重新读取”。本地存储的数据源卡片只列出已绑定的 Notion 数据集并保留拉取/推送按钮，Token、数据集发现和连接引导统一放在 Notion 数据源页。
 
-设置内容共享同一个固定高度的滚动容器：左侧导航点击后平滑滚动到对应分区，IntersectionObserver 反向高亮当前分区；`scrollbar-gutter: stable` 保证滚动条出现/消失不会引起布局偏移。标签采用“停用”语义：`Tag.retired` 只把标签移出选择列表，历史记录的 `tagIds`、日历展示和 Notion `multi_select` 都保持不变，标签管理页提供恢复入口。`AppSettings.uiMode` 控制窗口/抽屉模式，`document.documentElement.dataset.uiMode` 驱动 CSS 紧凑布局，抽屉窗口重新显示时会重放滑入动效。
+设置内容共享同一个固定高度的滚动容器：左侧导航点击后定位到目标分区在**实际滚动容器**（窗口模式为 `settings-content`，抽屉模式为 `main-area`）中的位置并平滑滚动，滚动途中冻结 scroll-spy，IntersectionObserver 以视口为基准反向高亮当前分区；`scrollbar-gutter: stable` 保证滚动条出现/消失不会引起布局偏移，页面级滚动始终为零。标签采用“停用”语义：`Tag.retired` 只把标签移出选择列表，历史记录的 `tagIds`、日历展示和 Notion `multi_select` 都保持不变，标签管理页提供恢复入口。`AppSettings.uiMode` 控制窗口/抽屉模式，`document.documentElement.dataset.uiMode` 驱动 CSS 紧凑布局；抽屉模式下 `app-shell` 固定为视口高度、顶栏不继承 `min-height: 100vh`，主区域 `flex: 1` 内部滚动，抽屉窗口重新显示时会重放滑入动效。
+
+记录删除采用两段式确认：第一次点击只切换到确认条，确认后才执行本地删除或 Notion 归档。侧栏快捷入口的标签会弹出日期浮层（该标签下的去重日期 + 记录标题，最多 8 条），点击后调用 `openDate` 跳转日历并打开当天记录。
 
 ## 3. Rust/Tauri 模块
 
