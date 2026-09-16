@@ -38,6 +38,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.args != '' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.platform }}-${{ matrix.args }}
       - name: Install dependencies
         run: npm ci
       - name: Build Tauri desktop package
@@ -69,6 +74,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          cache: gradle
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: android
       - name: Configure runner Android SDK
         shell: bash
         run: |
