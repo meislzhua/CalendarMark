@@ -2631,3 +2631,40 @@ input::placeholder {
     justify-content: flex-end;
   }
 }
+
+/* --- 数据源卡片堆叠与本地同步 --- */
+
+.source-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.notion-dataset-list--compact .notion-dataset-option {
+  padding: 0;
+}
+
+.local-sync-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 17px 20px;
+}
+
+.local-sync-empty > div {
+  display: grid;
+  gap: 4px;
+}
+
+.local-sync-empty strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.local-sync-empty span {
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+

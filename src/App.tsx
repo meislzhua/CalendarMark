@@ -825,7 +825,7 @@ function DataSourceSettings({ settings, onChangeSettings, entries, onChangeEntri
         </button>
       })}
     </div>
-    {selectedSource.id === 'notion' && <NotionSourceSettings mode="direct" settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} onReloadRemote={onReloadRemote} />}
+    {selectedSource.id === 'notion' && <NotionSourceSettings settings={settings} onChangeSettings={onChangeSettings} onNotice={onNotice} onReloadRemote={onReloadRemote} />}
     {selectedSource.id === 'local' && <LocalSourceSettings settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} onSelectNotion={() => update({ dataSource: 'notion' })} />}
     {selectedSource.status === 'planned' && <PlannedSourceSettings sourceId={selectedSource.id} />}
   </>
@@ -839,25 +839,18 @@ function DataSourceIcon({ id }: { id: DataSourceId }) {
 }
 
 type NotionBusyState = 'idle' | 'discovering' | 'checking' | 'pulling' | 'pushing'
-type NotionSourceMode = 'direct' | 'local-sync'
 
 type NotionSourceSettingsProps = {
-  mode: NotionSourceMode
   settings: AppSettings
   onChangeSettings: Dispatch<SetStateAction<AppSettings>>
-  entries: CalendarEntry[]
-  onChangeEntries: (entries: CalendarEntry[]) => void
-  tags: Tag[]
-  onChangeTags: (tags: Tag[]) => void
   onNotice: (message: string) => void
   onReloadRemote?: () => void
 }
 
-function NotionSourceSettings({ mode, settings, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onNotice, onReloadRemote }: NotionSourceSettingsProps) {
+function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRemote }: NotionSourceSettingsProps) {
   const [connection, setConnection] = useState<NotionConnectionInfo | null>(null)
   const [discoveredDatasets, setDiscoveredDatasets] = useState<NotionDatasetOption[]>([])
   const [busy, setBusy] = useState<NotionBusyState>('idle')
-  const isDirectMode = mode === 'direct'
   const savedDatasets = settings.notionDatasets ?? []
   const selectedDataset = getActiveNotionDataset(settings)
   const activeDatabaseId = selectedDataset?.databaseId ?? settings.notionDatabaseId.trim()
@@ -946,67 +939,16 @@ function NotionSourceSettings({ mode, settings, onChangeSettings, entries, onCha
     }
   }
 
-  async function handlePull() {
-    if (!isConfigured) {
-      onNotice('请先填写 Token，点击“发现数据集”并添加一个数据集')
-      return
-    }
-    setBusy('pulling')
-    try {
-      const result = await pullNotionEntries(settings.notionToken, activeDatabaseId, activeDataSourceId)
-      const merged = mergeNotionEntries(result.entries, entries, tags)
-      onChangeTags(merged.tags)
-      onChangeEntries(merged.entries)
-      setConnection(result.connection)
-      rememberConnection(result.connection)
-      onNotice(formatSyncNotice(isDirectMode ? `已读取 Notion ${result.entries.length} 条记录` : `已从 Notion 拉取 ${result.entries.length} 条记录到本地`, result.warnings))
-    } catch (error) {
-      onNotice(error instanceof Error ? error.message : String(error))
-    } finally {
-      setBusy('idle')
-    }
-  }
-
-  async function handlePush() {
-    if (!isConfigured) {
-      onNotice('请先填写 Token，点击“发现数据集”并添加一个数据集')
-      return
-    }
-    setBusy('pushing')
-    try {
-      const result = await pushNotionEntries(
-        settings.notionToken,
-        activeDatabaseId,
-        activeDataSourceId || undefined,
-        entries.map((entry) => toNotionEntryInput(entry, tags, activeDataSourceId || undefined)),
-      )
-      applyPushResult(result, onChangeEntries, entries)
-      setConnection(result.connection)
-      rememberConnection(result.connection)
-      onNotice(formatSyncNotice(`已推送 ${result.entries.length} 条本地记录到 Notion`, result.warnings))
-    } catch (error) {
-      onNotice(error instanceof Error ? error.message : String(error))
-    } finally {
-      setBusy('idle')
-    }
-  }
-
   const busyLabel = busy === 'discovering'
     ? '正在发现可访问的数据集…'
     : busy === 'checking'
       ? '正在检查连接…'
-      : busy === 'pulling'
-        ? '正在从 Notion 拉取…'
-        : busy === 'pushing'
-          ? '正在推送本地记录…'
-          : isDirectMode
-            ? '远程直连：编辑后自动保存'
-            : '连接状态：未检查'
+      : '远程直连：编辑后自动保存'
   const mapping = connection?.mapping
 
   return <>
     <div className="source-card source-card--notion">
-      <div className="source-card-top"><div className="notion-logo">N</div><div><strong>Notion</strong><span>{isDirectMode ? '远程数据源 · 读取和写入均直接访问 Notion' : '本地数据源 · 可按需与 Notion 双向同步'}</span></div><span className="connection-badge"><span className={`status-dot ${connection ? 'status-dot--ready' : 'status-dot--muted'}`} />{connection ? '已连接' : isDirectMode && isConfigured ? '自动同步' : isConfigured ? '待检查' : '待配置'}</span></div>
+      <div className="source-card-top"><div className="notion-logo">N</div><div><strong>Notion</strong><span>远程数据源 · 读取和写入均直接访问 Notion</span></div><span className="connection-badge"><span className={`status-dot ${connection ? 'status-dot--ready' : 'status-dot--muted'}`} />{connection ? '已连接' : isConfigured ? '自动同步' : '待配置'}</span></div>
       <div className="source-divider" />
       <div className="source-fields">
         <label className="field-label" htmlFor="notion-token"><span>Integration Token</span><span className="field-hint"><KeyRound size={12} />仅保存在本机</span></label>
@@ -1042,12 +984,10 @@ function NotionSourceSettings({ mode, settings, onChangeSettings, entries, onCha
       </div>
       {connection && connection.dataSources.length > 1 && <div className="notion-data-source-picker"><label className="field-label" htmlFor="notion-data-source"><span>当前 Database 的 data source</span><span className="field-hint">也可以从连接结果切换</span></label><select id="notion-data-source" className="settings-input" value={activeDataSourceId} onChange={(event) => { const source = connection.dataSources.find((item) => item.id === event.target.value); if (!source) return; rememberDataset({ databaseId: connection.databaseId, databaseTitle: connection.databaseTitle, dataSourceId: source.id, dataSourceName: source.name }); setConnection(null) }}>{connection.dataSources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</select></div>}
       {connection && <div className="notion-connection-panel"><div className="notion-connection-heading"><span><Check size={14} />已连接到 {connection.databaseTitle}</span><small>{connection.dataSourceName}</small></div><div className="notion-mapping-grid"><span>标题：{mapping?.titleProperty ?? '未识别'}</span><span>日期：{mapping?.dateProperty ?? '未识别'}</span><span>正文：{mapping?.contentProperty ?? '未配置'}</span><span>标签：{mapping?.tagsProperty ?? '未配置'}</span><span>附件：{mapping?.filesProperty ?? '未配置'}</span></div>{mapping && !mapping.ready && <div className="notion-mapping-error">{mapping.message}</div>}<div className="notion-schema-list">{connection.properties.map((property) => <span key={`${property.id}-${property.name}`}><b>{property.name}</b><small>{property.propertyType}</small></span>)}</div></div>}
-      <div className="source-card-footer source-card-footer--notion"><span><RefreshCw size={15} className={busy !== 'idle' ? 'spin' : ''} />{busyLabel}</span><div className="notion-actions"><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleCheckConnection() }}><RefreshCw size={15} />检查连接</button>{isDirectMode
-        ? <button type="button" className="secondary-button" disabled={busy !== 'idle' || !isConfigured} onClick={() => onReloadRemote?.()}><RefreshCw size={15} />重新读取</button>
-        : <><button type="button" className="secondary-button" disabled={busy !== 'idle' || !isConfigured} onClick={() => { void handlePull() }}><ArrowLeft size={15} />拉取到本地</button><button type="button" className="primary-button" disabled={busy !== 'idle' || !isConfigured} onClick={() => { void handlePush() }}><Cloud size={15} />推送到 Notion</button></>}</div></div>
+      <div className="source-card-footer source-card-footer--notion"><span><RefreshCw size={15} className={busy !== 'idle' ? 'spin' : ''} />{busyLabel}</span><div className="notion-actions"><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleCheckConnection() }}><RefreshCw size={15} />检查连接</button><button type="button" className="secondary-button" disabled={busy !== 'idle' || !isConfigured} onClick={() => onReloadRemote?.()}><RefreshCw size={15} />重新读取</button></div></div>
     </div>
     <NotionSetupGuide />
-    <div className="info-banner"><Sparkles size={16} /><span><strong>{isDirectMode ? '远程直连规则：' : '本地同步规则：'}</strong>{isDirectMode ? 'CalendarMark 启动或切换到 Notion 时自动读取远端数据；保存和删除记录会直接写入 Notion，不会把记录持久化到本机数据文件。Notion 侧有外部改动时，可点击“重新读取”刷新当前数据集。' : 'CalendarMark 当前以本地记录为主；点击“拉取到本地”合并 Notion 数据，点击“推送到 Notion”将本地记录创建或更新到远端。'}</span></div>
+    <div className="info-banner"><Sparkles size={16} /><span><strong>远程直连规则：</strong>CalendarMark 启动或切换到 Notion 时自动读取远端数据；保存和删除记录会直接写入 Notion，不会把记录持久化到本机数据文件。Notion 侧有外部改动时，可点击“重新读取”刷新当前数据集。</span></div>
   </>
 }
 
@@ -1147,17 +1087,101 @@ function NotionSetupGuide() {
   </section>
 }
 
-type LocalSourceSettingsProps = Omit<NotionSourceSettingsProps, 'mode'> & { onSelectNotion: () => void }
+type LocalSourceSettingsProps = {
+  settings: AppSettings
+  onChangeSettings: Dispatch<SetStateAction<AppSettings>>
+  entries: CalendarEntry[]
+  onChangeEntries: (entries: CalendarEntry[]) => void
+  tags: Tag[]
+  onChangeTags: (tags: Tag[]) => void
+  onNotice: (message: string) => void
+  onSelectNotion: () => void
+}
 
 function LocalSourceSettings({ settings, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onNotice, onSelectNotion }: LocalSourceSettingsProps) {
+  const [busy, setBusy] = useState<'idle' | 'pulling' | 'pushing'>('idle')
+  const savedDatasets = settings.notionDatasets ?? []
+  const selectedDataset = getActiveNotionDataset(settings)
+  const isConfigured = Boolean(settings.notionToken.trim() && selectedDataset?.databaseId)
+
+  async function handlePull() {
+    const dataset = getActiveNotionDataset(settings)
+    if (!settings.notionToken.trim() || !dataset?.databaseId) {
+      onNotice('请先在 Notion 数据源中完成连接并添加数据集')
+      return
+    }
+    setBusy('pulling')
+    try {
+      const result = await pullNotionEntries(settings.notionToken, dataset.databaseId, dataset.dataSourceId)
+      const merged = mergeNotionEntries(result.entries, entries, tags)
+      onChangeTags(merged.tags)
+      onChangeEntries(merged.entries)
+      onNotice(formatSyncNotice(`已从 Notion 拉取 ${result.entries.length} 条记录到本地`, result.warnings))
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function handlePush() {
+    const dataset = getActiveNotionDataset(settings)
+    if (!settings.notionToken.trim() || !dataset?.databaseId) {
+      onNotice('请先在 Notion 数据源中完成连接并添加数据集')
+      return
+    }
+    setBusy('pushing')
+    try {
+      const result = await pushNotionEntries(
+        settings.notionToken,
+        dataset.databaseId,
+        dataset.dataSourceId,
+        entries.map((entry) => toNotionEntryInput(entry, tags, dataset.dataSourceId)),
+      )
+      applyPushResult(result, onChangeEntries, entries)
+      onNotice(formatSyncNotice(`已推送 ${result.entries.length} 条本地记录到 Notion`, result.warnings))
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy('idle')
+    }
+  }
+
   return <>
-    <div className="source-card source-card--local">
-      <div className="source-card-top"><div className="source-placeholder-icon"><HardDrive size={18} /></div><div><strong>本地存储</strong><span>本地记录为主，可按需同步远程数据</span></div><span className="connection-badge"><span className="status-dot status-dot--ready" />可用</span></div>
-      <div className="source-divider" />
-      <div className="local-source-body"><p>当前日历使用本机数据，保存会立即写入本地。下方可以选择一个已授权的 Notion 数据集，手动拉取到本地或将本地记录推送到远程。</p><div className="local-source-points"><span><Check size={14} />离线可用</span><span><Check size={14} />本地优先</span><span><Check size={14} />按需同步</span></div></div>
-      <div className="source-card-footer"><span><Database size={15} />想让每次编辑直接写远程？</span><button type="button" className="secondary-button" onClick={onSelectNotion}><Database size={15} />切换为 Notion 直连</button></div>
+    <div className="source-stack">
+      <div className="source-card source-card--local">
+        <div className="source-card-top"><div className="source-placeholder-icon"><HardDrive size={18} /></div><div><strong>本地存储</strong><span>本地记录为主，数据保存在此设备</span></div><span className="connection-badge"><span className="status-dot status-dot--ready" />可用</span></div>
+        <div className="source-divider" />
+        <div className="local-source-body"><p>当前日历使用本机数据，保存会立即写入本地。已绑定的远程数据集可以按需拉取到本地，或将本地记录推送到远程。</p><div className="local-source-points"><span><Check size={14} />离线可用</span><span><Check size={14} />本地优先</span><span><Check size={14} />按需同步</span></div></div>
+      </div>
+      <div className="source-card source-card--remote-sync">
+        <div className="source-card-top"><div className="notion-logo">N</div><div><strong>已绑定的 Notion 数据集</strong><span>只列出本机已添加的远程数据集</span></div><span className="connection-badge"><span className={`status-dot ${isConfigured ? 'status-dot--ready' : 'status-dot--muted'}`} />{isConfigured ? '待同步' : '未绑定'}</span></div>
+        <div className="source-divider" />
+        {savedDatasets.length > 0
+          ? <>
+            <div className="notion-dataset-list notion-dataset-list--compact">
+              {savedDatasets.map((dataset) => {
+                const active = selectedDataset && notionDatasetKey(dataset) === notionDatasetKey(selectedDataset)
+                return <div className={'notion-dataset-option' + (active ? ' notion-dataset-option--active' : '')} key={notionDatasetKey(dataset)}>
+                  <button type="button" className="notion-dataset-select" onClick={() => onChangeSettings((previous) => ({
+                    ...previous,
+                    notionDatabaseId: dataset.databaseId,
+                    notionDataSourceId: dataset.dataSourceId,
+                  }))}>
+                    <span className="notion-dataset-copy"><strong>{dataset.databaseTitle}</strong><small>{dataset.dataSourceName}</small></span>
+                    {active && <span className="notion-dataset-current">同步目标</span>}
+                  </button>
+                </div>
+              })}
+            </div>
+            {settings.notionToken.trim()
+              ? <div className="source-card-footer source-card-footer--notion"><span><RefreshCw size={15} className={busy !== 'idle' ? 'spin' : ''} />{busy === 'pulling' ? '正在从 Notion 拉取…' : busy === 'pushing' ? '正在推送本地记录…' : '本地 ↔ 已选数据集'}</span><div className="notion-actions"><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handlePull() }}><ArrowLeft size={15} />拉取到本地</button><button type="button" className="primary-button" disabled={busy !== 'idle'} onClick={() => { void handlePush() }}><Cloud size={15} />推送到 Notion</button></div></div>
+              : <div className="local-sync-empty"><span>数据集需要配合 Integration Token 使用。</span><button type="button" className="secondary-button" onClick={onSelectNotion}>去 Notion 数据源配置 Token</button></div>}
+          </>
+          : <div className="local-sync-empty"><div><strong>还没有绑定远程数据集</strong><span>在 Notion 数据源中完成连接并添加数据集后，这里会显示可同步的目标。</span></div><button type="button" className="secondary-button" onClick={onSelectNotion}><Database size={15} />去 Notion 数据源配置</button></div>}
+      </div>
     </div>
-    <NotionSourceSettings mode="local-sync" settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} />
+    <div className="info-banner"><Sparkles size={16} /><span><strong>本地同步规则：</strong>CalendarMark 当前以本地记录为主；点击“拉取到本地”合并 Notion 数据，点击“推送到 Notion”将本地记录创建或更新到远端。想让每次编辑直接写远程？切换到 Notion 数据源即可。</span></div>
   </>
 }
 
