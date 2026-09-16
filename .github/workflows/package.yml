@@ -169,30 +169,52 @@ jobs:
         run: npm ci
       - name: Initialize Android project
         run: npx tauri android init --ci --skip-targets-install
+      - name: Configure release signing
+        shell: python
+        run: |
+          import re, shutil
+          gradle = "src-tauri/gen/android/app/build.gradle.kts"
+          s = open(gradle, encoding="utf-8").read()
+          if "signingConfigs {" not in s:
+              block = (
+                  "    signingConfigs {\n"
+                  "        create(\"release\") {\n"
+                  "            storeFile = rootProject.file(\"calendarmark-release.keystore\")\n"
+                  "            storePassword = System.getenv(\"CM_KEYSTORE_PASSWORD\")\n"
+                  "            keyAlias = System.getenv(\"CM_KEYSTORE_ALIAS\")\n"
+                  "            keyPassword = System.getenv(\"CM_KEYSTORE_PASSWORD\")\n"
+                  "        }\n"
+                  "    }\n"
+              )
+              anchor = s.find("buildTypes {")
+              if anchor == -1:
+                  raise SystemExit("buildTypes block not found")
+              s = s[:anchor] + block + s[anchor:]
+          # 模板可能是 release { ... } 或 getByName("release") { ... }
+          pat = re.compile(r'(buildTypes\s*\{[\s\S]*?(?:getByName\(\"release\"\)|release)\s*\{)')
+          m = pat.search(s)
+          if not m:
+              raise SystemExit("release build type not found")
+          window = s[m.end():m.end() + 500]
+          if "signingConfig" not in window:
+              s = s[:m.end()] + "\n            signingConfig = signingConfigs.getByName(\"release\")" + s[m.end():]
+          open(gradle, "w", encoding="utf-8").write(s)
+          # 校验：signingConfigs 块 + release 内 signingConfig 都必须存在
+          out = open(gradle, encoding="utf-8").read()
+          m2 = pat.search(out)
+          assert m2 and "signingConfig = signingConfigs.getByName(\"release\")" in out[m2.end():m2.end() + 500], "signingConfig not inside release block"
+          shutil.move("calendarmark-release.keystore", "src-tauri/gen/android/calendarmark-release.keystore")
+          print("release signing configured")
       - name: Build Android per-ABI APKs
         shell: bash
         run: |
           set -o pipefail
-          KEYSTORE="$GITHUB_WORKSPACE/calendarmark-release.keystore"
-          npx tauri android build --ci --apk --split-per-abi --verbose -- \
-            -Pandroid.injected.signing.store.file="$KEYSTORE" \
-            -Pandroid.injected.signing.store.password="$CM_KEYSTORE_PASSWORD" \
-            -Pandroid.injected.signing.store.type=jks \
-            -Pandroid.injected.signing.key.alias="$CM_KEYSTORE_ALIAS" \
-            -Pandroid.injected.signing.key.password="$CM_KEYSTORE_PASSWORD" \
-            2>&1 | tee android-build.log
+          npx tauri android build --ci --apk --split-per-abi --verbose 2>&1 | tee android-build.log
       - name: Build Android universal APK + AAB
         shell: bash
         run: |
           set -o pipefail
-          KEYSTORE="$GITHUB_WORKSPACE/calendarmark-release.keystore"
-          npx tauri android build --ci --apk --aab --verbose -- \
-            -Pandroid.injected.signing.store.file="$KEYSTORE" \
-            -Pandroid.injected.signing.store.password="$CM_KEYSTORE_PASSWORD" \
-            -Pandroid.injected.signing.store.type=jks \
-            -Pandroid.injected.signing.key.alias="$CM_KEYSTORE_ALIAS" \
-            -Pandroid.injected.signing.key.password="$CM_KEYSTORE_PASSWORD" \
-            2>&1 | tee -a android-build.log
+          npx tauri android build --ci --apk --aab --verbose 2>&1 | tee -a android-build.log
       - name: Collect versioned Android packages
         shell: bash
         run: |
