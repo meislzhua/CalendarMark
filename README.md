@@ -6,7 +6,9 @@ CalendarMark 是一个基于 Tauri 2 的本地优先日历记录工具：用标�
 
 ## 产品要点
 
-- **日历总览**：按月查看每个日期的标签、记录数量和附件标记。
+- **日历总览**：按月查看每个日期的标签、记录数量、心情和附件标记；点击年月可快捷跳转任意月份。
+- **常驻记录面板**：窗口模式在日历右侧、抽屉模式在日历下方直接编辑选中日期，不再弹出抽屉层。
+- **心情记录**：每条记录可选心情 emoji，显示在日历格子上，并同步到 Notion 的“心情”select 属性（存在时）。
 - **标签体系**：停用标签只是不再提供选择，已有记录和远端内容保持不变，可随时恢复；侧栏快捷入口点击标签会列出带该标签的日期，点击日期直接跳转。
 - **删除保护**：删除日期记录需要二次确认，避免误触。
 - **日期记录**：标题、正文、快捷标签，以及图片、TXT、Markdown、PDF 附件。
@@ -26,7 +28,7 @@ CalendarMark 是一个基于 Tauri 2 的本地优先日历记录工具：用标�
 | UI | React 19 + TypeScript + Vite |
 | 桌面壳 | Tauri 2 + Rust |
 | 交互图标 | lucide-react |
-| 桌面能力 | Tauri tray icon、global-shortcut、autostart、window/event API |
+| 桌面能力 | Tauri tray icon、global-shortcut、autostart、opener、window/event API |
 | CI/CD | GitHub Actions + tauri-apps/tauri-action |
 | 目标平台 | Windows、macOS、Android（Android Action 中初始化生成工程） |
 
@@ -119,7 +121,7 @@ Android job 会安装 JDK 17、Android SDK platform/build-tools/NDK，并使用 
 
 选择 Notion 作为当前数据源时：
 
-1. CalendarMark 启动或切换数据集时自动读取远端页面，日历展示的是当前 Notion 数据。
+1. CalendarMark 启动或切换数据集时按月读取远端页面（Notion query 服务端日期/标签筛选，超过单页 100 条时自动分页），已加载的月份在本地缓存，切换年月不会重复请求。
 2. 保存记录会直接创建或更新 Notion 页面；本地附件会直接上传到 Notion File Upload API。
 3. 附件首次上传后会保存 Notion 返回的 file upload ID，再次编辑同一条记录时直接复用引用，不会重复上传文件。
 4. 删除记录会直接将对应 Notion 页面移入回收站。

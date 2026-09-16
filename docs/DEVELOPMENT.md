@@ -57,8 +57,16 @@ Notion 已由 `src-tauri/src/notion.rs` 通过 Rust HTTP client 接入，React �
 - 开机启动由 `tauri-plugin-autostart` 实现，插件只在桌面目标初始化；能力文件只授权 `enable/disable/is-enabled` 三个命令。
 - `src/tauri.ts` 中的 `readAutostartEnabled` / `setAutostartEnabled` 负责浏览器和移动端降级，UI 层不需要重复判断平台。
 - 快捷键录制在 `SystemSettings` 中通过捕获型 `keydown` 监听实现：至少一个 Ctrl/Cmd/Alt 修饰键 + 普通按键才生成合法 accelerator，Esc 取消录制。
+- 快捷键注册必须走 `registerGlobalShortcut` 的串行队列，不要在组件里直接调用插件 API；并发注册（StrictMode/快速修改）会因注销-注册竞态而失败。
+- 外部链接一律通过 `openInExternalBrowser`（tauri-plugin-opener）在系统浏览器打开，不要在 WebView 内导航离开应用。
 - 标签删除是“停用”语义：只更新 `Tag.retired`，不要从 entries、draft 或 Notion 内容中移除标签引用；需要真正清理历史时再引入显式的批量操作。
 - 抽屉模式依赖 `get_window_work_area` 命令与窗口权限；新增窗口操作时同步更新 capabilities，浏览器预览通过 `isDesktopTauriRuntime` 降级。
+
+### 数据源接口
+
+- UI 层读写日历数据必须通过 `CalendarDataSource`（`src/data-source.ts`），不要在组件里直接调用 `pullNotionEntries` / `pushNotionEntries`；按月加载与月份缓存在 App 的数据 effect 中统一处理。
+- 远程查询带 `dateStart`/`dateEnd`/`tag` 条件时由 Notion 服务端过滤；新增筛选维度先扩展 `NotionPullQuery` 与 Rust `build_query_filter`。
+- 心情字段是 `CalendarEntry.mood`（emoji 字符串）；Notion 映射到“心情”select 属性，属性不存在时静默忽略。
 
 本地可以使用单元测试验证字段映射和 ID 规范化：
 

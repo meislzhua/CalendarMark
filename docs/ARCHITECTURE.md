@@ -44,6 +44,8 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 - `showMainWindow()`：显示并聚焦主窗口。
 - `toggleMainWindow()`：为未来托盘/快捷入口保留的切换能力。
 - `registerGlobalShortcut()`：处理快捷键注册、修改时注销旧组合、浏览器降级。
+- 快捷键注册使用串行队列：StrictMode/快速连续修改时保证 注销 → 注册 顺序，避免竞态导致注册失败；回调通过引用更新，快捷键不变时不重新注册。
+- `openInExternalBrowser()`：通过 opener 插件用系统默认浏览器打开外部链接（如 Notion Integrations 页面）。
 - `readAutostartEnabled()` / `setAutostartEnabled()`：包装 autostart 插件；仅桌面 runtime 可用，浏览器和移动端返回不可用状态。
 - `toggleMainWindow()`：快捷键语义——窗口已聚焦时收起，未聚焦或隐藏时显示并聚焦。
 - `applyUiMode()`：切换窗口/抽屉模式。抽屉模式读取 Rust 侧 `get_window_work_area` 返回的工作区，将窗口调整为贴右侧的无边框窄窗口；窗口模式恢复装饰、尺寸并居中。
@@ -53,9 +55,15 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 
 只负责 Tauri IPC 的类型和调用封装：发现数据集、检查连接、读取页面、写入页面和归档页面。远程直连模式由 App 在启动/切换数据集时调用读取命令；本地模式的设置面板才显示显式拉取/推送按钮。浏览器预览不会直接访问 Notion。
 
+### `src/data-source.ts`
+
+统一的日历数据源接口 `CalendarDataSource`：`loadMonth(year, month)` 按月读取、`queryTagDates(tagName)` 跨月标签查询、`saveEntry` / `deleteEntry` 单条写入。本地实现是内存直通（App state + localStorage effect 持久化）；Notion 实现封装 IPC 的筛选查询（dateStart/dateEnd/tag）、远端引用合并与归档。UI 层只依赖此接口，不感知数据源差异；新增远程数据源（WebDAV/Obsidian）时实现同一接口即可接入月份按需加载与写入。
+
+Rust 侧 `notion_pull_entries` 接受可选 query（日期区间 + 标签），转换为 Notion query filter 在服务端筛选，分页仍由适配器循环处理；超过单页 100 条的数据集无需全量拉取。心情映射为可选的“心情”select 属性（按属性类型自动识别），推送时写入/清除 select 值，读取时带回 `mood` 字段。
+
 ### `src/App.tsx`
 
-当前 MVP 使用单一页面状态管理，`view` 区分日历/设置，`drawerOpen` 控制记录抽屉。`dataSource=notion` 时，页面启动、切换数据集或点击“重新读取”会自动查询远端（查询前有 500ms 防抖，合并 Token 输入等连续变化），编辑保存和删除直接调用 Notion；`dataSource=local` 时加载/保存 `localStorage`，并在本地数据源配置中提供显式远程同步。
+当前 MVP 使用单一页面状态管理，`view` 区分日历/设置。日历总览由“日历 + 常驻记录面板”组成：窗口模式两列并排（面板在右侧、共享视口高度），抽屉模式单列堆叠（面板在日历下方）；点击日期只更新选中态与面板内容，不再弹出抽屉层。远程模式按月加载数据：`currentMonth` 变化时通过数据源接口查询该月，已加载月份缓存复用，“重新读取”清空缓存强制刷新；快捷入口的标签浮层通过 `queryTagDates` 跨月查询。保存/删除统一走数据源接口。侧栏“数据源状态”是可点击入口（跳转设置数据源分区），快捷入口“管理标签”跳转到标签管理分区；年月标题点击展开年月快捷选择器。
 
 设置页分为数据源、系统、界面和标签管理四个分区。系统设置包含开机启动开关（autostart 插件）和全局快捷键；快捷键通过“读取组合键”按钮捕获下一次按键组合生成 Tauri accelerator（至少需要一个 Ctrl/Cmd/Alt 修饰键，Esc 取消），不再依赖手工输入。日历总览工具栏在远程直连模式下提供刷新按钮，等价于设置页的“重新读取”。本地存储的数据源卡片只列出已绑定的 Notion 数据集并保留拉取/推送按钮，Token、数据集发现和连接引导统一放在 Notion 数据源页。
 
