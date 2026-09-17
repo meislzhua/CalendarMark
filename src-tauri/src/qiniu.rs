@@ -236,28 +236,6 @@ fn normalize_download_domain(domain: &str) -> String {
     }
 }
 
-fn region_config(
-    region: &str,
-) -> (
-    &'static str,
-    &'static str,
-    &'static str,
-    &'static str,
-    &'static str,
-) {
-    // 兼容旧文档中出现过的 cn-east-2a 写法
-    let normalized = if region.trim() == "cn-east-2a" {
-        "cn-east-2"
-    } else {
-        region.trim()
-    };
-    REGIONS
-        .iter()
-        .find(|(id, _, _, _, _)| *id == normalized)
-        .copied()
-        .unwrap_or(REGIONS[0])
-}
-
 fn url_encode_component(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {
@@ -449,7 +427,7 @@ pub async fn qiniu_bucket_domains(
 }
 
 /// 通过 UC /v2/query 自动识别空间所在区域（如 z0/z2），
-/// 用于上传域名选择和用量统计，避免用户手选区域出错。
+/// 用于设置展示；上传前也会重新查询，避免本地保存的区域陈旧。
 #[tauri::command]
 pub async fn qiniu_query_region(raw: QiniuRawCredential, bucket: String) -> Result<String, String> {
     let credential = parse_credential(&raw)?;
@@ -873,16 +851,45 @@ pub async fn qiniu_put_object(
     content_type: String,
 ) -> Result<(), String> {
     let credential = parse_credential(&raw)?;
+    let bucket = bucket.trim().to_string();
+    if bucket.is_empty() {
+        return Err("请先选择七牛空间。".to_string());
+    }
+    // 不信任前端保存的 region；每次上传前通过 UC 查询空间真实区域，
+    // 再选择官方源站上传域名，避免区域设置陈旧时出现 incorrect region。
+    let _ = region;
+    let client = qiniu_client()?;
+    let query = format!(
+        "/v2/query?ak={}&bucket={}",
+        url_encode_component(&credential.access_key),
+        url_encode_component(&bucket)
+    );
+    let (status, body) =
+        management_request(&client, &credential, UC_HOST, Method::GET, &query, None).await?;
+    if !status.is_success() {
+        return Err(format_qiniu_error("识别上传空间区域失败", status, &body));
+    }
+    let parsed: Value =
+        serde_json::from_str(&body).map_err(|error| format!("解析上传空间区域失败：{error}"))?;
+    let region_id = parsed
+        .get("region")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let upload_host = REGIONS
+        .iter()
+        .find(|(id, _, _, _, _)| *id == region_id)
+        .map(|(_, _, upload_host, _, _)| *upload_host)
+        .ok_or_else(|| format!("七牛空间区域 {region_id} 暂不支持上传，请更新应用。"))?;
     let data = BASE64
         .decode(data_base64.trim())
         .map_err(|error| format!("附件数据无法解码：{error}"))?;
     if data.is_empty() {
         return Err("附件内容为空，无法上传。".to_string());
     }
-    let (upload_host, _, _, _, _) = region_config(&region);
     let upload_token = build_upload_token(
         &credential,
-        bucket.trim(),
+        &bucket,
         &key,
         now_unix() + UPLOAD_DEADLINE_SECONDS,
     );
@@ -902,7 +909,6 @@ pub async fn qiniu_put_object(
                 .mime_str(mime)
                 .map_err(|error| format!("附件类型不合法：{error}"))?,
         );
-    let client = qiniu_client()?;
     let response = client
         .post(format!("https://{upload_host}"))
         .multipart(form)
@@ -1121,6 +1127,37 @@ mod tests {
         }))
         .expect("读取七牛账号用量");
         assert!(usage.storage_bytes > 0);
+    }
+
+    // 可选真实上传/删除链路：QINIU_ACCESS_KEY/QINIU_SECRET_KEY/QINIU_BUCKET=... cargo test -- --ignored
+    #[test]
+    #[ignore]
+    fn uploads_and_deletes_real_object_when_bucket_is_provided() {
+        let Ok(access_key) = std::env::var("QINIU_ACCESS_KEY") else {
+            return;
+        };
+        let Ok(secret_key) = std::env::var("QINIU_SECRET_KEY") else {
+            return;
+        };
+        let Ok(bucket) = std::env::var("QINIU_BUCKET") else {
+            return;
+        };
+        let raw = QiniuRawCredential {
+            access_key,
+            secret_key,
+        };
+        let key = format!("__calendarmark_upload_test/{}.json", now_unix());
+        tauri::async_runtime::block_on(qiniu_put_object(
+            raw.clone(),
+            bucket.clone(),
+            "bad-region-for-central-upload".to_string(),
+            key.clone(),
+            BASE64.encode("{}"),
+            "application/json".to_string(),
+        ))
+        .expect("上传测试对象");
+        tauri::async_runtime::block_on(qiniu_delete_object(raw, bucket, "z0".to_string(), key))
+            .expect("删除测试对象");
     }
 
     #[test]

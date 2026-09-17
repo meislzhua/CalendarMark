@@ -311,9 +311,61 @@ body {
   background: linear-gradient(90deg, #6cae8c, #4d8f8a);
 }
 
+.qiniu-usage-toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 14px;
+  gap: 4px 6px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: var(--surface-muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+.qiniu-usage-toggle:hover {
+  border-color: var(--line-strong);
+}
+
+.qiniu-usage-toggle-copy {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.qiniu-usage-toggle-copy span {
+  color: var(--ink-muted);
+  font-size: 9px;
+}
+
+.qiniu-usage-toggle-copy strong {
+  color: var(--ink);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.qiniu-usage-toggle .qiniu-usage-bar {
+  grid-column: 1;
+  width: 100%;
+}
+
+.qiniu-usage-chevron {
+  grid-column: 2;
+  color: var(--ink-faint);
+  transition: transform 140ms ease;
+}
+
+.qiniu-usage-chevron--up {
+  transform: rotate(180deg);
+}
+
 .qiniu-usage-metrics {
   display: grid;
   gap: 7px;
+  margin-top: 7px;
 }
 
 .qiniu-usage-metric {
@@ -1758,6 +1810,11 @@ input::placeholder {
 .qiniu-usage-panel .qiniu-usage-metric-top strong,
 .qiniu-usage-panel .qiniu-usage-metric-top span,
 .qiniu-usage-panel .qiniu-usage-metric small {
+  font-size: 11px;
+}
+
+.qiniu-usage-panel .qiniu-usage-toggle-copy span,
+.qiniu-usage-panel .qiniu-usage-toggle-copy strong {
   font-size: 11px;
 }
 

@@ -229,35 +229,78 @@ const QINIU_FREE_CDN_ORIGIN_BYTES = 10_000_000_000
 const QINIU_FREE_GET_CALLS = 1_000_000
 const QINIU_FREE_PUT_DELETE_CALLS = 100_000
 
+type QiniuUsageMetric = {
+  label: string
+  used: string
+  quota: string
+  usedValue: number
+  quotaValue: number
+}
+
 function formatQiniuCount(value: number): string {
   return Number.isFinite(value) && value > 0 ? value.toLocaleString() : '0'
 }
 
-function QiniuUsageRows({ usage }: { usage: QiniuUsage }) {
-  const metrics = [
+function getQiniuUsageMetrics(usage: QiniuUsage): QiniuUsageMetric[] {
+  return [
     { label: '标准存储', used: formatQiniuBytes(usage.storageBytes), quota: '10 GB', usedValue: usage.storageBytes, quotaValue: QINIU_FREE_STORAGE_BYTES },
     { label: 'GET 请求', used: formatQiniuCount(usage.getCalls), quota: '100 万次', usedValue: usage.getCalls, quotaValue: QINIU_FREE_GET_CALLS },
     { label: 'PUT/DELETE 请求', used: formatQiniuCount(usage.putDeleteCalls), quota: '10 万次', usedValue: usage.putDeleteCalls, quotaValue: QINIU_FREE_PUT_DELETE_CALLS },
     { label: 'CDN 回源流量', used: formatQiniuBytes(usage.cdnOriginFlowBytes), quota: '10 GB', usedValue: usage.cdnOriginFlowBytes, quotaValue: QINIU_FREE_CDN_ORIGIN_BYTES },
     { label: '外网流出流量', used: formatQiniuBytes(usage.outboundFlowBytes), quota: '', usedValue: usage.outboundFlowBytes, quotaValue: 0 },
   ]
+}
+
+function getHighestQiniuUsageMetric(metrics: QiniuUsageMetric[]): QiniuUsageMetric {
+  return metrics.reduce((highest, metric) => (
+    metric.quotaValue > 0 && metric.usedValue / metric.quotaValue > highest.usedValue / highest.quotaValue
+      ? metric
+      : highest
+  ), metrics[0])
+}
+
+function QiniuUsageSummary({ usage, expanded, onToggle }: { usage: QiniuUsage; expanded: boolean; onToggle: () => void }) {
+  const metric = getHighestQiniuUsageMetric(getQiniuUsageMetrics(usage))
+  const ratio = metric.usedValue / metric.quotaValue
+  const percent = Math.round(ratio * 100)
   return (
-    <div className="qiniu-usage-metrics">
-      {metrics.map((metric) => (
-        <div className="qiniu-usage-metric" key={metric.label}>
-          <div className="qiniu-usage-metric-top">
-            <span>{metric.label}</span>
-            <strong>{metric.used}</strong>
-          </div>
-          {metric.quotaValue > 0 && (
-            <div className="qiniu-usage-bar" aria-hidden="true">
-              <span style={{ width: `${Math.min(100, Math.round((metric.usedValue / metric.quotaValue) * 100))}%` }} />
+    <button type="button" className="qiniu-usage-toggle" onClick={onToggle} aria-expanded={expanded}>
+      <span className="qiniu-usage-toggle-copy">
+        <span>{expanded ? '收起明细' : '额度使用最高'}</span>
+        <strong>{metric.label} · {percent}%</strong>
+      </span>
+      <span className="qiniu-usage-bar" aria-hidden="true">
+        <span style={{ width: `${Math.min(100, percent)}%` }} />
+      </span>
+      <ChevronDown size={12} className={expanded ? 'qiniu-usage-chevron qiniu-usage-chevron--up' : 'qiniu-usage-chevron'} />
+    </button>
+  )
+}
+
+function QiniuUsageRows({ usage, expanded, onToggle }: { usage: QiniuUsage; expanded: boolean; onToggle: () => void }) {
+  const metrics = getQiniuUsageMetrics(usage)
+  return (
+    <>
+      <QiniuUsageSummary usage={usage} expanded={expanded} onToggle={onToggle} />
+      {expanded && (
+        <div className="qiniu-usage-metrics">
+          {metrics.map((metric) => (
+            <div className="qiniu-usage-metric" key={metric.label}>
+              <div className="qiniu-usage-metric-top">
+                <span>{metric.label}</span>
+                <strong>{metric.used}</strong>
+              </div>
+              {metric.quotaValue > 0 && (
+                <div className="qiniu-usage-bar" aria-hidden="true">
+                  <span style={{ width: `${Math.min(100, Math.round((metric.usedValue / metric.quotaValue) * 100))}%` }} />
+                </div>
+              )}
+              <small>{metric.quotaValue > 0 ? `免费额度 ${metric.quota} / 月` : '按量计费，未列免费额度'}</small>
             </div>
-          )}
-          <small>{metric.quotaValue > 0 ? `免费额度 ${metric.quota} / 月` : '按量计费，未列免费额度'}</small>
+          ))}
         </div>
-      ))}
-    </div>
+      )}
+    </>
   )
 }
 
@@ -325,6 +368,7 @@ function App() {
   const [remoteDataState, setRemoteDataState] = useState<RemoteDataState>(isRemoteDataSource(settings.dataSource) ? 'needs-config' : 'local')
   const [qiniuUsage, setQiniuUsage] = useState<QiniuUsage | null>(null)
   const [qiniuUsageState, setQiniuUsageState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const [qiniuUsageExpanded, setQiniuUsageExpanded] = useState(false)
   const previousDataSourceRef = useRef<AppSettings['dataSource'] | null>(null)
   const previousNotionTargetRef = useRef<string | null>(null)
   const loadedMonthsRef = useRef<Set<string>>(new Set())
@@ -840,7 +884,11 @@ function App() {
               {qiniuUsageState === 'loading' && <p className="qiniu-usage-value">正在读取…</p>}
               {qiniuUsageState === 'error' && <p className="qiniu-usage-value qiniu-usage-value--error">读取失败，点击刷新重试</p>}
               {qiniuUsageState === 'ready' && qiniuUsage && (
-                <QiniuUsageRows usage={qiniuUsage} />
+                <QiniuUsageRows
+                  usage={qiniuUsage}
+                  expanded={qiniuUsageExpanded}
+                  onToggle={() => setQiniuUsageExpanded((expanded) => !expanded)}
+                />
               )}
               <button
                 type="button"
@@ -1820,6 +1868,7 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
   const [newBucketName, setNewBucketName] = useState('calendarmark')
   const [usage, setUsage] = useState<QiniuUsage | null>(null)
   const [usageError, setUsageError] = useState('')
+  const [usageExpanded, setUsageExpanded] = useState(false)
   const update = (partial: Partial<AppSettings>) => onChangeSettings((previous) => ({ ...previous, ...partial }))
   const accessKey = settings.qiniuAccessKey.trim()
   const secretKey = settings.qiniuSecretKey.trim()
@@ -2029,7 +2078,11 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
           <button type="button" className="text-button" onClick={() => { void refreshUsage(accessKey, secretKey) }}>刷新</button>
         </div>
         {usage && (
-          <QiniuUsageRows usage={usage} />
+          <QiniuUsageRows
+            usage={usage}
+            expanded={usageExpanded}
+            onToggle={() => setUsageExpanded((expanded) => !expanded)}
+          />
         )}
         {!usage && usageError && <p className="qiniu-usage-value qiniu-usage-value--error">{usageError}</p>}
       </div>

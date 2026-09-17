@@ -118,10 +118,10 @@ Android 不创建桌面托盘，相关代码由 `#[cfg(desktop)]` 排除；React
 
 - 管理凭证（`Authorization: Qiniu AK:sign`）：签名串 = `Method Path?Query\nHost: host\n[Content-Type: ct]\n\n[body]`，用于空间管理、对象管理和账号级用量统计。
 - URL-safe Base64 必须保留 `=` padding（与官方 SDK 的 `base64.URLEncoding` 一致）：HMAC-SHA1 签名编码后为 28 字符；去掉 padding 会被服务端判定 bad token（401）。
-- 上传凭证（表单上传）：`AK:urlsafe(HMAC-SHA1(encodedPolicy)):urlsafe(policy)`，policy 限定 `scope=bucket:key` 与 deadline，按区域选择上传域名。
+- 上传凭证（表单上传）：`AK:urlsafe(HMAC-SHA1(encodedPolicy)):urlsafe(policy)`，policy 限定 `scope=bucket:key` 与 deadline；上传前先通过 UC `/v2/query` 查询空间真实区域，再提交到对应的官方源站上传域名（如 `up-z2.qiniup.com`）。
 - 下载凭证（私有空间）：`domain/key?e=deadline&token=AK:sign`，纯本地 HMAC 计算，无需网络请求即可生成附件预览/外链。
 - 对象管理：v1 `POST {rsf.qiniu.com}/list` 前缀列举、`POST {rs.qiniu.com}/delete/<EncodedEntryURI>` 删除（612 幂等处理），读取经签名下载链接取回内容。rs/rsf 使用中心域名自动路由到空间真实区域，避免用户选错区域导致 `incorrect zone`。
-- 区域自动识别：选择空间时调用 `GET /v2/query?ak=&bucket=` 获取空间真实区域（如 z2）并写回设置；上传域名依赖正确区域。用量统计不传 `$bucket/$region`，直接读取整个账号的汇总值。
+- 区域自动识别：选择空间时调用 `GET /v2/query?ak=&bucket=` 获取空间真实区域（如 z2）并写回设置，用于空间信息展示；上传前也会重新查询真实区域，不信任可能陈旧的本地设置。对象管理和用量统计使用中心域名/账号级汇总，同样不依赖用户手选区域。
 - 账号级用量并发调用 `/v6/space`、`/v6/blob_io?select=hits&$metric=hits`、`/v6/rs_put?select=hits`、`/v6/blob_io?select=flow&$metric=cdn_flow_out` 和 `/v6/blob_io?select=flow&$metric=flow_out`；时间范围是中国时区本月 1 日至今，请求数/流量按天求和，存储取最后快照。单个指标失败时先降级为 0，全部失败才向 UI 报错。
 - `mkbucketv3` 创建空间成功后立即调用 `/private?bucket=..&private=1`，保证快捷创建的空间一定是私有空间。
 
