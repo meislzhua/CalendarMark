@@ -18,6 +18,7 @@ const USER_AGENT: &str = "CalendarMark/0.2.2";
 const LIST_PAGE_SIZE: u32 = 1000;
 const UPLOAD_DEADLINE_SECONDS: u64 = 3600;
 const DOWNLOAD_TTL_SECONDS: u64 = 3600;
+const SOURCE_DOWNLOAD_TTL_SECONDS: u64 = 180;
 
 pub const REGIONS: &[(&str, &str, &str, &str, &str)] = &[
     // (region id, label, 源站上传 host, 对象管理 rs host, 对象列举 rsf host)
@@ -230,7 +231,23 @@ fn build_private_download_url(
 ) -> String {
     let base = normalize_download_domain(domain);
     let deadline = now_unix() + ttl_seconds.max(60);
-    let to_sign = format!("{base}/{key}?e={deadline}");
+    let encoded_key = encode_object_key_path(key);
+    let to_sign = format!("{base}/{encoded_key}?e={deadline}");
+    let token = hmac_sha1_urlsafe(&credential.secret_key, &to_sign);
+    format!("{to_sign}&token={}:{}", credential.access_key, token)
+}
+
+/// 构造内部读取用的源站下载链接。绑定域名可能有 CDN 缓存，应用内保存/刷新
+/// 必须始终读取源站，否则会出现“远端对象已更新但界面仍是旧数据”的情况。
+fn build_private_source_download_url(
+    credential: &QiniuCredential,
+    host: &str,
+    key: &str,
+) -> String {
+    let base = normalize_download_domain(host);
+    let deadline = now_unix() + SOURCE_DOWNLOAD_TTL_SECONDS.max(60);
+    let encoded_key = encode_object_key_path(key);
+    let to_sign = format!("{base}/{encoded_key}?e={deadline}");
     let token = hmac_sha1_urlsafe(&credential.secret_key, &to_sign);
     format!("{to_sign}&token={}:{}", credential.access_key, token)
 }
@@ -255,6 +272,19 @@ fn url_encode_component(value: &str) -> String {
         }
     }
     encoded
+}
+
+fn encode_object_key_path(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'/' => '/'.to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 fn encoded_entry(bucket: &str, key: &str) -> String {
@@ -424,17 +454,81 @@ pub async fn qiniu_bucket_domains(
 ) -> Result<Vec<String>, String> {
     let credential = parse_credential(&raw)?;
     let client = qiniu_client()?;
-    let query = format!("/v2/domains?tbl={}", url_encode_component(bucket.trim()));
-    let (status, body) =
-        management_request(&client, &credential, UC_HOST, Method::GET, &query, None).await?;
-    if !status.is_success() {
-        return Err(format_qiniu_error("获取空间域名失败", status, &body));
-    }
-    serde_json::from_str::<Vec<String>>(&body)
-        .map_err(|error| format!("解析七牛空间域名失败：{error}"))
+    qiniu_bucket_domains_inner(&client, &credential, bucket.trim()).await
 }
 
-/// 通过 UC /v2/query 自动识别空间所在区域（如 z0/z2），
+#[derive(Debug)]
+struct QiniuBucketEndpoints {
+    region_id: String,
+    source_download_host: String,
+}
+
+async fn query_bucket_endpoints(
+    client: &Client,
+    credential: &QiniuCredential,
+    bucket: &str,
+) -> Result<QiniuBucketEndpoints, String> {
+    // v4/query 会返回空间级 io_src 源站下载入口；v2 的 io 入口是存储 IO
+    // 入口，直接拼对象 key 会 404，不能作为应用内读取地址。
+    let query = format!(
+        "/v4/query?ak={}&bucket={}",
+        url_encode_component(&credential.access_key),
+        url_encode_component(bucket)
+    );
+    let (status, body) =
+        management_request(client, credential, UC_HOST, Method::GET, &query, None).await?;
+    if !status.is_success() {
+        return Err(format_qiniu_error("识别空间区域失败", status, &body));
+    }
+    let parsed: Value =
+        serde_json::from_str(&body).map_err(|error| format!("解析空间区域失败：{error}"))?;
+    let host = parsed.pointer("/hosts/0").unwrap_or(&parsed);
+    let region_id = host
+        .get("region")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if region_id.is_empty() {
+        return Err("七牛没有返回空间区域，请确认空间存在。".to_string());
+    }
+
+    // v4 的 io_src 是空间级源站下载入口；io 是区域存储 IO 入口。
+    // 源站入口优先于绑定下载域名，因为绑定域名可能命中 CDN 缓存。
+    let dynamic_source_host = [
+        "/hosts/0/io_src/domains/0",
+        "/hosts/0/io_src/main/0",
+        "/hosts/0/io/src/domains/0",
+        "/hosts/0/io/src/main/0",
+    ]
+    .iter()
+    .find_map(|pointer| {
+        parsed
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let source_download_host = dynamic_source_host.ok_or_else(|| {
+        format!("七牛没有返回空间 {region_id} 的源站下载域名，请更新应用或稍后重试。")
+    })?;
+
+    Ok(QiniuBucketEndpoints {
+        region_id,
+        source_download_host,
+    })
+}
+
+async fn resolve_source_download_host(
+    client: &Client,
+    credential: &QiniuCredential,
+    bucket: &str,
+    _configured_region: &str,
+) -> Result<String, String> {
+    query_bucket_endpoints(client, credential, bucket)
+        .await
+        .map(|endpoints| endpoints.source_download_host)
+}
+
+/// 通过 UC /v4/query 自动识别空间所在区域（如 z0/z2），
 /// 用于设置展示；上传前也会重新查询，避免本地保存的区域陈旧。
 #[tauri::command]
 pub async fn qiniu_query_region(raw: QiniuRawCredential, bucket: String) -> Result<String, String> {
@@ -444,27 +538,9 @@ pub async fn qiniu_query_region(raw: QiniuRawCredential, bucket: String) -> Resu
         return Err("请先选择空间。".to_string());
     }
     let client = qiniu_client()?;
-    let query = format!(
-        "/v2/query?ak={}&bucket={}",
-        url_encode_component(&credential.access_key),
-        url_encode_component(&bucket)
-    );
-    let (status, body) =
-        management_request(&client, &credential, UC_HOST, Method::GET, &query, None).await?;
-    if !status.is_success() {
-        return Err(format_qiniu_error("识别空间区域失败", status, &body));
-    }
-    let parsed: Value =
-        serde_json::from_str(&body).map_err(|error| format!("解析空间区域失败：{error}"))?;
-    let region = parsed
-        .get("region")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if region.is_empty() {
-        return Err("七牛没有返回空间区域，请确认空间存在。".to_string());
-    }
-    Ok(region)
+    Ok(query_bucket_endpoints(&client, &credential, &bucket)
+        .await?
+        .region_id)
 }
 
 fn format_stats_time(timestamp: u64) -> String {
@@ -729,7 +805,7 @@ pub async fn qiniu_list_keys(
 async fn fetch_object_bytes(
     client: &Client,
     credential: &QiniuCredential,
-    domain: &str,
+    source_host: &str,
     key: &str,
 ) -> Result<Option<Vec<u8>>, String> {
     let mut last_error = String::new();
@@ -738,7 +814,7 @@ async fn fetch_object_bytes(
             tokio::time::sleep(Duration::from_millis(150 * attempt as u64)).await;
         }
 
-        let url = build_private_download_url(credential, domain, key, DOWNLOAD_TTL_SECONDS);
+        let url = build_private_source_download_url(credential, source_host, key);
         let response = match client.get(&url).send().await {
             Ok(response) => response,
             Err(error) => {
@@ -752,7 +828,7 @@ async fn fetch_object_bytes(
         }
         if status == StatusCode::UNAUTHORIZED {
             return Err(format!(
-                "下载 {key} 失败：下载凭证被拒绝，请检查密钥与空间域名。"
+                "下载 {key} 失败：源站下载凭证被拒绝，请检查密钥与空间。"
             ));
         }
         if !status.is_success() {
@@ -776,18 +852,11 @@ pub async fn qiniu_get_object(
     key: String,
 ) -> Result<Option<String>, String> {
     let credential = parse_credential(&raw)?;
-    let _ = region;
+    let _ = domain;
     let client = qiniu_client()?;
-    let domain = if domain.trim().is_empty() {
-        let domains = qiniu_bucket_domains_inner(&client, &credential, &bucket).await?;
-        domains
-            .into_iter()
-            .next()
-            .ok_or_else(|| "空间还没有可用域名，请先在七牛控制台绑定域名。".to_string())?
-    } else {
-        domain
-    };
-    let bytes = fetch_object_bytes(&client, &credential, &domain, &key).await?;
+    let source_host =
+        resolve_source_download_host(&client, &credential, bucket.trim(), &region).await?;
+    let bytes = fetch_object_bytes(&client, &credential, &source_host, &key).await?;
     Ok(bytes.map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
 }
 
@@ -816,18 +885,11 @@ pub async fn qiniu_get_attachment_data_url(
     mime_type: String,
 ) -> Result<Option<String>, String> {
     let credential = parse_credential(&raw)?;
-    let _ = region;
+    let _ = domain;
     let client = qiniu_client()?;
-    let domain = if domain.trim().is_empty() {
-        let domains = qiniu_bucket_domains_inner(&client, &credential, &bucket).await?;
-        domains
-            .into_iter()
-            .next()
-            .ok_or_else(|| "空间还没有可用域名，请先在七牛控制台绑定域名。".to_string())?
-    } else {
-        domain
-    };
-    let bytes = fetch_object_bytes(&client, &credential, &domain, &key).await?;
+    let source_host =
+        resolve_source_download_host(&client, &credential, bucket.trim(), &region).await?;
+    let bytes = fetch_object_bytes(&client, &credential, &source_host, &key).await?;
     Ok(bytes.map(|bytes| {
         format!(
             "data:{};base64,{}",
@@ -937,23 +999,10 @@ async fn resolve_upload_host(
     credential: &QiniuCredential,
     bucket: &str,
 ) -> Result<String, String> {
-    let query = format!(
-        "/v2/query?ak={}&bucket={}",
-        url_encode_component(&credential.access_key),
-        url_encode_component(&bucket)
-    );
-    let (status, body) =
-        management_request(&client, &credential, UC_HOST, Method::GET, &query, None).await?;
-    if !status.is_success() {
-        return Err(format_qiniu_error("识别上传空间区域失败", status, &body));
-    }
-    let parsed: Value =
-        serde_json::from_str(&body).map_err(|error| format!("解析上传空间区域失败：{error}"))?;
-    let region_id = parsed
-        .get("region")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let endpoints = query_bucket_endpoints(client, credential, bucket)
+        .await
+        .map_err(|error| format!("识别上传空间区域失败：{error}"))?;
+    let region_id = endpoints.region_id.as_str();
     let upload_host = REGIONS
         .iter()
         .find(|(id, _, _, _, _)| *id == region_id)
@@ -1109,24 +1158,17 @@ pub async fn qiniu_get_objects(
     keys: Vec<String>,
 ) -> Result<Vec<Option<String>>, String> {
     let credential = parse_credential(&raw)?;
-    let _ = region;
+    let _ = domain;
     let client = qiniu_client()?;
-    let domain = if domain.trim().is_empty() {
-        let domains = qiniu_bucket_domains_inner(&client, &credential, &bucket).await?;
-        domains
-            .into_iter()
-            .next()
-            .ok_or_else(|| "空间还没有可用域名，请先在七牛控制台绑定域名。".to_string())?
-    } else {
-        domain
-    };
+    let source_host =
+        resolve_source_download_host(&client, &credential, bucket.trim(), &region).await?;
     let mut results = Vec::with_capacity(keys.len());
     let client_ref = &client;
     let credential_ref = &credential;
-    let domain_ref = domain.as_str();
+    let source_host_ref = source_host.as_str();
     for chunk in keys.chunks(8) {
         let futures = chunk.iter().map(|key| async move {
-            fetch_object_bytes(client_ref, credential_ref, domain_ref, key)
+            fetch_object_bytes(client_ref, credential_ref, source_host_ref, key)
                 .await
                 .map(|bytes| bytes.map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
         });
@@ -1270,6 +1312,7 @@ mod tests {
             secret_key,
         }))
         .expect("读取七牛账号用量");
+        println!("QINIU_USAGE={usage:?}");
         assert!(usage.storage_bytes > 0);
     }
 
@@ -1302,6 +1345,51 @@ mod tests {
         .expect("上传测试对象");
         tauri::async_runtime::block_on(qiniu_delete_object(raw, bucket, "z0".to_string(), key))
             .expect("删除测试对象");
+    }
+
+    // 可选真实读取诊断：验证应用内部读取源站，而不是可能缓存的绑定 CDN 域名。
+    #[test]
+    #[ignore]
+    fn reads_real_object_from_source_host_when_credentials_are_provided() {
+        let Ok(access_key) = std::env::var("QINIU_ACCESS_KEY") else {
+            return;
+        };
+        let Ok(secret_key) = std::env::var("QINIU_SECRET_KEY") else {
+            return;
+        };
+        let Ok(bucket) = std::env::var("QINIU_BUCKET") else {
+            return;
+        };
+        let key = std::env::var("QINIU_KEY")
+            .unwrap_or_else(|_| "calendarmark/date/2026-09-17.json".to_string());
+        let credential = QiniuCredential {
+            access_key,
+            secret_key,
+        };
+        let client = qiniu_client().unwrap();
+        let endpoints =
+            tauri::async_runtime::block_on(query_bucket_endpoints(&client, &credential, &bucket))
+                .expect("读取空间源站信息");
+        let objects = tauri::async_runtime::block_on(qiniu_get_objects(
+            QiniuRawCredential {
+                access_key: credential.access_key.clone(),
+                secret_key: credential.secret_key.clone(),
+            },
+            bucket.clone(),
+            String::new(),
+            String::new(),
+            vec![key.clone()],
+        ))
+        .expect("通过应用读取链路读取对象");
+        let body = objects
+            .into_iter()
+            .next()
+            .flatten()
+            .unwrap_or_else(|| "<missing>".to_string());
+        println!(
+            "QINIU_REGION={}\nQINIU_SOURCE_HOST={}\nQINIU_OBJECT={body}",
+            endpoints.region_id, endpoints.source_download_host
+        );
     }
 
     #[test]
@@ -1339,6 +1427,14 @@ mod tests {
         let url = build_private_download_url(&credential, "cdn.example.com", "files/demo.png", 120);
         assert!(url.starts_with("http://cdn.example.com/files/demo.png?e="));
         assert!(url.contains("&token="));
+    }
+
+    #[test]
+    fn encodes_object_key_path_without_escaping_slashes() {
+        assert_eq!(
+            encode_object_key_path("tags/写代码 1/date.json"),
+            "tags/%E5%86%99%E4%BB%A3%E7%A0%81%201/date.json"
+        );
     }
 
     #[test]
