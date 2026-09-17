@@ -15,7 +15,7 @@
 ┌──────────────────────────┼──────────────────────────────────┐
 │ Rust / Tauri 2            │                                  │
 │  tray icon · hide on close · global-shortcut plugin          │
-│  Notion HTTP adapter · field mapping · pagination            │
+│  Notion HTTP adapter · Qiniu Kodo adapter · pagination       │
 └──────────────────────────┼──────────────────────────────────┘
                            │
               Windows / macOS / Android targets
@@ -27,7 +27,7 @@
 
 ### `src/types.ts`
 
-集中定义 `CalendarEntry`、`Tag`、`Attachment`、`AppSettings`、`DataSourceId` 和 `DATA_SOURCE_DEFINITIONS`，并提供日期键、种子数据和 ID 工具，避免 UI 组件重复解释数据格式。数据源定义包含 `notion`、`local`、`webdav`、`obsidian` 四个入口及 `active / preview / planned` 状态，新增 provider 时不需要重写设置页的选择器。
+集中定义 `CalendarEntry`、`Tag`、`Attachment`、`AppSettings`、`DataSourceId` 和 `DATA_SOURCE_DEFINITIONS`，并提供日期键、种子数据和 ID 工具，避免 UI 组件重复解释数据格式。数据源定义包含 `notion`、`local`、`qiniu`、`webdav`、`obsidian` 入口及 `active / preview / planned` 状态，新增 provider 时不需要重写设置页的选择器。
 
 ### `src/storage.ts`
 
@@ -55,9 +55,24 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 
 只负责 Tauri IPC 的类型和调用封装：发现数据集、检查连接、读取页面、写入页面和归档页面。远程直连模式由 App 在启动/切换数据集时调用读取命令；本地模式的设置面板才显示显式拉取/推送按钮。浏览器预览不会直接访问 Notion。
 
+### `src/qiniu.ts`
+
+七牛 Kodo IPC 封装：列出/创建空间（创建后自动设为私有）、获取空间域名、读取用量、列举对象键、读写对象、签名下载链接和删除对象。前端不持有密钥签名逻辑，只透传用户配置。
+
 ### `src/data-source.ts`
 
-统一的日历数据源接口 `CalendarDataSource`：`loadMonth(year, month)` 按月读取、`queryTagDates(tagName)` 跨月标签查询、`saveEntry` / `deleteEntry` 单条写入。本地实现是内存直通（App state + localStorage effect 持久化）；Notion 实现封装 IPC 的筛选查询（dateStart/dateEnd/tag）、远端引用合并与归档。UI 层只依赖此接口，不感知数据源差异；新增远程数据源（WebDAV/Obsidian）时实现同一接口即可接入月份按需加载与写入。
+统一的日历数据源接口 `CalendarDataSource`：`loadMonth(year, month)` 按月读取、`queryTagDates(tagName)` 跨月标签查询、`saveEntry` / `deleteEntry` 单条写入。本地实现是内存直通（App state + localStorage effect 持久化）；Notion 实现封装 IPC 的筛选查询（dateStart/dateEnd/tag）、远端引用合并与归档；七牛实现把日历数据映射为对象存储布局。UI 层只依赖此接口，不感知数据源差异；新增远程数据源（WebDAV/Obsidian）时实现同一接口即可接入月份按需加载与写入。
+
+七牛 Kodo 目录布局：
+
+```text
+{prefix}/date/{YYYY-MM-DD}.json        # 当天全部记录（数组），保存只写一个对象，避免跨设备读改写竞态
+{prefix}/files/{file_id}{.ext}         # 附件原始内容，MIME/大小等元数据在日期文档中
+{prefix}/tags/{tag}/{YYYY-MM-DD}.json  # 标签 → 日期倒排索引，快捷入口一次前缀列举即可跨月查询
+{prefix}/meta/tags.json                # 标签定义（颜色/停用态），换设备不丢
+```
+
+`loadMonth` 一次并发读取当月全部日期文档，图片附件由 Rust 侧经签名下载链接取回并转为 Data URL 预览；`saveEntry` 先上传新增附件，再写日期文档并增量维护标签索引；`deleteEntry` 删除记录独享的附件对象、重写或删除日期文档并清理失效索引。
 
 Rust 侧 `notion_pull_entries` 接受可选 query（日期区间 + 标签），转换为 Notion query filter 在服务端筛选，分页仍由适配器循环处理；超过单页 100 条的数据集无需全量拉取。心情映射为可选的“心情”select 属性（按属性类型自动识别），推送时写入/清除 select 值，读取时带回 `mood` 字段。
 
@@ -82,7 +97,7 @@ Rust 侧 `notion_pull_entries` 接受可选 query（日期区间 + 标签），�
 5. 托盘“设置”显示窗口并 emit `calendar-mark:open-settings`。
 6. 托盘“退出”调用 `app.exit(0)`。
 7. 拦截主窗口 `CloseRequested`，改为 `hide()`。
-8. 注册 Notion 命令，将 Token 留在 Rust 命令调用边界内，不把 Notion API 请求放进 React WebView。
+8. 注册 Notion / 七牛命令，将 Token 留在 Rust 命令调用边界内，不把这些 API 请求放进 React WebView。
 
 `src-tauri/src/notion.rs` 使用 `reqwest` + Rustls 调用 Notion REST API，当前实现：
 
@@ -98,6 +113,14 @@ Rust 侧 `notion_pull_entries` 接受可选 query（日期区间 + 标签），�
 - 对 429 和 5xx 做最多三次短退避重试，错误消息只返回 Notion 的状态和 message，不输出 Token。
 
 Android 不创建桌面托盘，相关代码由 `#[cfg(desktop)]` 排除；React 页面和数据模型继续复用。
+
+`src-tauri/src/qiniu.rs` 同样基于 `reqwest` + Rustls，不引入七牛 SDK，签名算法按官方文档实现（`hmac` + `sha1` + URL-safe Base64）：
+
+- 管理凭证（`Authorization: Qiniu AK:sign`）：签名串 = `Method Path?Query\nHost: host\n[Content-Type: ct]\n\n[body]`，用于空间列表、创建空间、设为私有、空间域名和 `/v6/space` 用量统计。
+- 上传凭证（表单上传）：`AK:urlsafe(HMAC-SHA1(encodedPolicy)):urlsafe(policy)`，policy 限定 `scope=bucket:key` 与 deadline，按区域选择上传域名。
+- 下载凭证（私有空间）：`domain/key?e=deadline&token=AK:sign`，纯本地 HMAC 计算，无需网络请求即可生成附件预览/外链。
+- 对象管理：`/list/2` 前缀列举、`/delete/<EncodedEntryURI>` 删除（612 幂等处理），读取经签名下载链接取回内容。
+- `mkbucketv3` 创建空间成功后立即调用 `/private?bucket=..&private=1`，保证快捷创建的空间一定是私有空间。
 
 ## 4. 数据模型
 
@@ -137,11 +160,12 @@ type Attachment = {
 DataSourceDefinition[]
 ├── Notion          active   → Token / 数据集发现与选择 / 同步操作
 ├── 本地存储         active   → 无需配置
+├── 七牛 Kodo        active   → AK:SK / 区域 / 空间选择与一键私有创建
 ├── WebDAV           planned
 └── Obsidian Vault   planned
 ```
 
-`AppSettings.dataSource` 只保存当前选择，Notion 专属字段保存 `notionToken`、当前选中的 `notionDatabaseId` / `notionDataSourceId`，以及可切换的 `notionDatasets` 本地列表。Database/Data source ID 仍作为同步适配器的内部引用和旧配置兼容字段，但设置界面不再要求用户手工填写。
+`AppSettings.dataSource` 只保存当前选择。Notion 专属字段保存 `notionToken`、当前选中的 `notionDatabaseId` / `notionDataSourceId`，以及可切换的 `notionDatasets` 本地列表；七牛专属字段保存 `qiniuToken`（AK:SK）、`qiniuBucket`、`qiniuRegion`、`qiniuDomain`（空间域名缓存，用于生成签名下载链接）和 `qiniuPrefix`。
 
 数据源运行语义如下：
 
@@ -165,6 +189,8 @@ Notion 远程直连
 
 远端页面 ID 保存在 `CalendarEntry.remote`，写入时据此决定创建还是更新；本地模式的拉取采用合并策略，不会删除本地未出现在远端结果中的条目。当前不会后台持续监听 Notion 的外部修改，外部改动需要点击“重新读取”刷新，也不提供自动冲突解决。
 
+七牛远程直连的运行语义与 Notion 相同：启动/切换/刷新时按月读取 `date/` 文档，保存记录时上传新增附件并写当天文档，删除记录时清理附件对象和标签索引；侧栏数据源入口上方常驻显示七牛标准存储用量（来自 `/v6/space`，统计延迟约 5 分钟）。
+
 ## 6. 权限和安全
 
 - `src-tauri/capabilities/default.json` 只开放 core 默认能力、全局快捷键 register/unregister、autostart 的 enable/disable/is-enabled，以及窗口 show/hide/set-focus/set-size/set-position/set-decorations 等模式切换所需权限。
@@ -172,6 +198,7 @@ Notion 远程直连
 - CSP 当前为 `null` 以支持 Vite/Tauri MVP；Notion 请求已经放入 Rust，生产发布仍应收紧 WebView CSP。
 - 当前 Token 随 `AppSettings` 保存在 WebView localStorage，方便 MVP 使用但不是系统级密钥链；正式发布前应迁移到 Tauri Store 的安全后端或系统 Keychain。
 - Notion Token 不发送给 CalendarMark 服务。拉取的文件 URL 是 Notion 返回的临时 URL；本地附件先作为 Data URL 保存并在推送时通过 File Upload API 上传，后续应把附件迁移到应用数据目录。
+- 七牛 AccessKey/SecretKey 是账号级凭据，同样只保存在本机、只由 Rust 侧直接请求七牛 API；快捷创建的空间固定为私有，附件经签名下载链接访问。建议用户在七牛为 CalendarMark 创建专用子账号授权，把泄露影响限制在单个空间。
 - 当前没有自动冲突解决、后台队列或离线重试；远程直连模式下双端同时编辑以最后一次写入为准，本地模式下以用户最后一次显式拉取/推送为准。
 
 ## 7. 跨平台策略

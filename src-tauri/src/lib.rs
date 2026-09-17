@@ -6,6 +6,7 @@ use tauri::{
 };
 
 mod notion;
+mod qiniu;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +55,18 @@ pub fn run() {
             notion::notion_archive_page,
             notion::notion_search_pages,
             notion::notion_create_database,
+            qiniu::qiniu_list_buckets,
+            qiniu::qiniu_regions,
+            qiniu::qiniu_create_bucket,
+            qiniu::qiniu_bucket_domains,
+            qiniu::qiniu_get_usage,
+            qiniu::qiniu_list_keys,
+            qiniu::qiniu_get_object,
+            qiniu::qiniu_get_objects,
+            qiniu::qiniu_get_attachment_data_url,
+            qiniu::qiniu_sign_download_urls,
+            qiniu::qiniu_put_object,
+            qiniu::qiniu_delete_object,
             get_window_work_area
         ])
         .setup(|_app| {

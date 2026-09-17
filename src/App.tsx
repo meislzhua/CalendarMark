@@ -86,6 +86,7 @@ import {
 import {
   createLocalDataSource,
   createNotionDataSource,
+  createQiniuDataSource,
 } from './data-source'
 import type { CalendarDataSource } from './data-source'
 import type {
@@ -95,6 +96,15 @@ import type {
   NotionPageOption,
   NotionPushResult,
 } from './notion'
+import {
+  createQiniuBucket,
+  getQiniuUsage,
+  listQiniuBucketDomains,
+  listQiniuBuckets,
+  listQiniuRegions,
+} from './qiniu'
+import type { QiniuUsage } from './qiniu'
+import type { QiniuRegionOption } from './types'
 
 type View = 'calendar' | 'settings'
 type SettingsSection = 'source' | 'system' | 'interface' | 'tags'
@@ -172,6 +182,45 @@ function getNotionTarget(settings: AppSettings): { databaseId: string; dataSourc
   }
 }
 
+function isRemoteDataSource(source: AppSettings['dataSource']): boolean {
+  return source !== 'local'
+}
+
+function getRemoteConfigError(settings: AppSettings): string | null {
+  if (settings.dataSource === 'local') return null
+  if (settings.dataSource === 'notion') {
+    const target = getNotionTarget(settings)
+    if (!settings.notionToken.trim() || !target.databaseId) return '请先在设置中配置 Notion Token 并添加数据集'
+    return null
+  }
+  if (settings.dataSource === 'qiniu') {
+    if (!settings.qiniuToken.trim() || !settings.qiniuBucket.trim()) return '请先在设置中配置七牛 AccessKey:SecretKey 并选择空间'
+    return null
+  }
+  return '当前数据源不可用'
+}
+
+function remoteTargetKey(settings: AppSettings): string {
+  if (settings.dataSource === 'qiniu') {
+    const prefix = settings.qiniuPrefix.trim().replace(/^\/+|\/+$/g, '') || 'calendarmark'
+    return `${settings.qiniuBucket.trim()}:${settings.qiniuRegion.trim() || 'z0'}:${prefix}`
+  }
+  const target = getNotionTarget(settings)
+  return `${target.databaseId}:${target.dataSourceId}`
+}
+
+function formatQiniuBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  return `${value >= 100 ? Math.round(value) : value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`
+}
+
 function withNotionDataset(settings: AppSettings, dataset: NotionDataset): AppSettings {
   const datasets = settings.notionDatasets ?? []
   const datasetKey = notionDatasetKey(dataset)
@@ -219,8 +268,8 @@ function App() {
   })
   const [selectedDate, setSelectedDate] = useState(today)
   const [settings, setSettings] = useState<AppSettings>(loadSettings)
-  const [entries, setEntries] = useState<CalendarEntry[]>(() => settings.dataSource === 'notion' ? [] : loadEntries())
-  const [tags, setTags] = useState<Tag[]>(() => settings.dataSource === 'notion' ? [] : loadTags())
+  const [entries, setEntries] = useState<CalendarEntry[]>(() => isRemoteDataSource(settings.dataSource) ? [] : loadEntries())
+  const [tags, setTags] = useState<Tag[]>(() => isRemoteDataSource(settings.dataSource) ? [] : loadTags())
   const [draft, setDraft] = useState<CalendarEntry>(() => createDraft(today))
   const [newTagName, setNewTagName] = useState('')
   const [tagManageMode, setTagManageMode] = useState(false)
@@ -233,14 +282,18 @@ function App() {
   const [monthPickerOpen, setMonthPickerOpen] = useState(false)
   const [shortcutState, setShortcutState] = useState<'ready' | 'browser' | 'error'>('browser')
   const [notice, setNotice] = useState('')
-  const [remoteDataState, setRemoteDataState] = useState<RemoteDataState>(settings.dataSource === 'notion' ? 'needs-config' : 'local')
+  const [remoteDataState, setRemoteDataState] = useState<RemoteDataState>(isRemoteDataSource(settings.dataSource) ? 'needs-config' : 'local')
+  const [qiniuUsage, setQiniuUsage] = useState<QiniuUsage | null>(null)
+  const [qiniuUsageState, setQiniuUsageState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const previousDataSourceRef = useRef<AppSettings['dataSource'] | null>(null)
   const previousNotionTargetRef = useRef<string | null>(null)
   const loadedMonthsRef = useRef<Set<string>>(new Set())
   const [remoteReloadToken, setRemoteReloadToken] = useState(0)
   const skipLocalSaveRef = useRef(false)
   const notionTarget = getNotionTarget(settings)
-  const notionTargetKey = `${notionTarget.databaseId}:${notionTarget.dataSourceId}`
+  const activeRemoteTargetKey = remoteTargetKey(settings)
+  const entriesRef = useRef(entries)
+  entriesRef.current = entries
   const settingsRef = useRef(settings)
   settingsRef.current = settings
   const tagsRef = useRef(tags)
@@ -250,8 +303,10 @@ function App() {
   const dataSource = useMemo<CalendarDataSource>(() => (
     settings.dataSource === 'notion'
       ? createNotionDataSource(() => settingsRef.current)
-      : createLocalDataSource()
-  ), [settings.dataSource, settings.notionToken, notionTarget.databaseId, notionTarget.dataSourceId])
+      : settings.dataSource === 'qiniu'
+        ? createQiniuDataSource(() => settingsRef.current, () => entriesRef.current)
+        : createLocalDataSource()
+  ), [settings.dataSource, settings.notionToken, notionTarget.databaseId, notionTarget.dataSourceId, settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion, settings.qiniuPrefix])
 
   const calendarCells = useMemo(() => getCalendarCells(currentMonth), [currentMonth])
   const monthTitle = new Intl.DateTimeFormat('zh-CN', {
@@ -267,7 +322,7 @@ function App() {
     const sourceChanged = previousDataSourceRef.current !== settings.dataSource
     previousDataSourceRef.current = settings.dataSource
 
-    if (settings.dataSource !== 'notion') {
+    if (!isRemoteDataSource(settings.dataSource)) {
       if (sourceChanged) {
         skipLocalSaveRef.current = true
         setEntries(loadEntries())
@@ -280,20 +335,20 @@ function App() {
 
     // 切换到远程模式或切换数据集时，立即清空上一个目标的运行时数据；
     // 仅修改 Token 时不清空，交给下方防抖后的远端读取刷新，避免输入过程中日历反复闪空。
-    const targetChanged = previousNotionTargetRef.current !== notionTargetKey
-    previousNotionTargetRef.current = notionTargetKey
+    const targetChanged = previousNotionTargetRef.current !== activeRemoteTargetKey
+    previousNotionTargetRef.current = activeRemoteTargetKey
     if (sourceChanged || targetChanged) {
       setEntries([])
       setTags([])
       loadedMonthsRef.current.clear()
     }
-  }, [settings.dataSource, notionTargetKey])
+  }, [settings.dataSource, activeRemoteTargetKey])
 
   // 远程模式按月按需加载：切换年月/刷新时只请求当前月的数据，
   // 远端超过单页 100 条时由数据源实现负责筛选与分页，避免每次全量拉取。
   useEffect(() => {
-    if (settings.dataSource !== 'notion') return undefined
-    if (!settings.notionToken.trim() || !notionTarget.databaseId) {
+    if (!isRemoteDataSource(settings.dataSource)) return undefined
+    if (getRemoteConfigError(settings)) {
       setRemoteDataState('needs-config')
       loadedMonthsRef.current.clear()
       return undefined
@@ -334,7 +389,7 @@ function App() {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [settings.dataSource, settings.notionToken, notionTarget.databaseId, notionTarget.dataSourceId, currentMonth, remoteReloadToken, dataSource])
+  }, [settings.dataSource, activeRemoteTargetKey, currentMonth, remoteReloadToken, dataSource])
 
   useEffect(() => {
     if (settings.dataSource !== 'local') return
@@ -410,6 +465,31 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [notice])
 
+  // 七牛额度用量：配置好七牛数据源后，在左下角数据源入口上方常驻显示。
+  useEffect(() => {
+    if (!settings.qiniuToken.trim() || !settings.qiniuBucket.trim()) {
+      setQiniuUsage(null)
+      setQiniuUsageState('idle')
+      return undefined
+    }
+    let cancelled = false
+    setQiniuUsageState('loading')
+    getQiniuUsage(settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion)
+      .then((usage) => {
+        if (cancelled) return
+        setQiniuUsage(usage)
+        setQiniuUsageState('ready')
+      })
+      .catch(() => {
+        if (cancelled) return
+        setQiniuUsage(null)
+        setQiniuUsageState('error')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion, settings.dataSource])
+
   // 年月选择器：点击外部关闭
   useEffect(() => {
     if (!monthPickerOpen) return undefined
@@ -432,7 +512,7 @@ function App() {
     void dataSource.queryTagDates(tagDatesFor.name)
       .then((remoteDates) => {
         if (cancelled) return
-        if (dataSource.kind === 'notion') {
+        if (dataSource.kind !== 'local') {
           setTagDates(remoteDates)
         } else {
           const dates = Array.from(new Set(entries
@@ -490,14 +570,14 @@ function App() {
       return
     }
 
-    if (settings.dataSource === 'notion') {
+    if (isRemoteDataSource(settings.dataSource)) {
       if (remoteDataState === 'loading') {
-        setNotice('正在读取 Notion 数据，请稍候再保存')
+        setNotice('正在读取远程数据，请稍候再保存')
         return
       }
-      const target = getNotionTarget(settings)
-      if (!settings.notionToken.trim() || !target.databaseId) {
-        setNotice('请先在设置中配置 Notion Token 并添加数据集')
+      const configError = getRemoteConfigError(settings)
+      if (configError) {
+        setNotice(configError)
         return
       }
       setRemoteDataState('saving')
@@ -513,7 +593,7 @@ function App() {
           return next
         })
         setRemoteDataState('ready')
-        setNotice('已直接保存到 Notion')
+        setNotice(settings.dataSource === 'qiniu' ? '已直接保存到七牛 Kodo' : '已直接保存到 Notion')
       } catch (error) {
         setRemoteDataState('error')
         setNotice(error instanceof Error ? error.message : String(error))
@@ -535,15 +615,15 @@ function App() {
   async function handleDeleteEntry() {
     const existing = entries.find((entry) => entry.id === draft.id)
     if (!existing) return
-    if (settings.dataSource === 'notion') {
-      const target = getNotionTarget(settings)
-      if (!settings.notionToken.trim() || !target.databaseId) {
-        setNotice('删除 Notion 记录前，请先补全连接配置')
+    if (isRemoteDataSource(settings.dataSource)) {
+      const configError = getRemoteConfigError(settings)
+      if (configError) {
+        setNotice(configError)
         return
       }
       setRemoteDataState('deleting')
       try {
-        setNotice('正在从 Notion 归档记录…')
+        setNotice(settings.dataSource === 'qiniu' ? '正在从七牛删除记录…' : '正在从 Notion 归档记录…')
         await dataSource.deleteEntry(existing)
       } catch (error) {
         setRemoteDataState('error')
@@ -705,16 +785,57 @@ function App() {
         </div>
 
         <div className="sidebar-footer">
+          {settings.qiniuToken.trim() && settings.qiniuBucket.trim() && (
+            <div className="qiniu-usage-card" role="status">
+              <div className="qiniu-usage-heading">
+                <Cloud size={14} />
+                <span>七牛额度用量</span>
+                <span className={`status-dot ${qiniuUsageState === 'ready' ? 'status-dot--ready' : qiniuUsageState === 'error' ? 'status-dot--error' : ''}`} />
+              </div>
+              {qiniuUsageState === 'loading' && <p className="qiniu-usage-value">正在读取…</p>}
+              {qiniuUsageState === 'error' && <p className="qiniu-usage-value qiniu-usage-value--error">读取失败，点击刷新重试</p>}
+              {qiniuUsageState === 'ready' && qiniuUsage && (
+                <>
+                  <p className="qiniu-usage-value">
+                    已用 {formatQiniuBytes(qiniuUsage.storageBytes)} / 免费 10 GB
+                  </p>
+                  <div className="qiniu-usage-bar" aria-hidden="true">
+                    <span style={{ width: `${Math.min(100, Math.round((qiniuUsage.storageBytes / (10 * 1024 * 1024 * 1024)) * 100))}%` }} />
+                  </div>
+                </>
+              )}
+              <button
+                type="button"
+                className="qiniu-usage-refresh"
+                onClick={() => {
+                  if (qiniuUsageState === 'loading') return
+                  setQiniuUsageState('loading')
+                  getQiniuUsage(settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion)
+                    .then((usage) => {
+                      setQiniuUsage(usage)
+                      setQiniuUsageState('ready')
+                    })
+                    .catch(() => {
+                      setQiniuUsage(null)
+                      setQiniuUsageState('error')
+                    })
+                }}
+              >
+                <RefreshCw size={12} className={qiniuUsageState === 'loading' ? 'spin' : ''} />
+                刷新
+              </button>
+            </div>
+          )}
           <button
             type="button"
             className="data-source-mini data-source-mini--action"
             title="切换数据源"
             onClick={() => { setSettingsJumpTo('source'); setView('settings') }}
           >
-            <span className={'status-dot ' + (settings.dataSource === 'notion' ? 'status-dot--ready' : '')} />
-            <span>{settings.dataSource === 'notion' ? 'Notion 远程数据' : '本地数据'}</span>
+            <span className={'status-dot ' + (isRemoteDataSource(settings.dataSource) ? 'status-dot--ready' : '')} />
+            <span>{settings.dataSource === 'notion' ? 'Notion 远程数据' : settings.dataSource === 'qiniu' ? '七牛 Kodo 远程数据' : '本地数据'}</span>
             <span className="data-source-divider">·</span>
-            <span>{settings.dataSource === 'notion' ? remoteStatusText : '可按需同步 Notion'}</span>
+            <span>{settings.dataSource === 'notion' ? remoteStatusText : settings.dataSource === 'qiniu' ? remoteStatusText : '可按需同步 Notion'}</span>
             <Settings2 size={13} />
           </button>
         </div>
@@ -762,12 +883,12 @@ function App() {
                 <button className="plain-icon-button" aria-label="下个月" onClick={() => moveMonth(1)}><ChevronRight size={18} /></button>
               </div>
               <div className="calendar-toolbar-actions">
-                {settings.dataSource === 'notion' && (
+                {isRemoteDataSource(settings.dataSource) && (
                   <button
                     type="button"
                     className="icon-button"
                     aria-label="刷新远程数据"
-                    title="重新读取 Notion 数据"
+                    title={settings.dataSource === 'qiniu' ? '重新读取七牛数据' : '重新读取 Notion 数据'}
                     disabled={remoteDataState === 'loading'}
                     onClick={() => { loadedMonthsRef.current.clear(); setRemoteReloadToken((token) => token + 1) }}
                   >
@@ -839,7 +960,7 @@ function App() {
                       <button type="button" className="danger-button" disabled={remoteDataState === 'deleting'} onClick={() => { void handleDeleteEntry() }}>确认删除</button>
                       <button type="button" className="text-button" onClick={() => setConfirmingDelete(false)}>取消</button>
                     </div>
-                    : <button type="button" className="danger-button" onClick={() => setConfirmingDelete(true)}><Trash2 size={15} />删除</button>)}<div className="drawer-footer-actions"><button type="submit" className="primary-button" disabled={remoteDataState === 'saving'}><Save size={15} />{settings.dataSource === 'notion' ? '保存到 Notion' : '保存记录'}</button></div></div>
+                    : <button type="button" className="danger-button" onClick={() => setConfirmingDelete(true)}><Trash2 size={15} />删除</button>)}<div className="drawer-footer-actions"><button type="submit" className="primary-button" disabled={remoteDataState === 'saving'}><Save size={15} />{settings.dataSource === 'notion' ? '保存到 Notion' : settings.dataSource === 'qiniu' ? '保存到七牛' : '保存记录'}</button></div></div>
                 </form>
               </aside>
             </section>
@@ -857,7 +978,7 @@ function App() {
 function AttachmentItem({ attachment, onRemove }: { attachment: Attachment; onRemove: () => void }) {
   const isImage = attachment.mimeType.startsWith('image/')
   const previewUrl = attachment.dataUrl || attachment.sourceUrl
-  return <div className="attachment-item">{isImage && previewUrl ? <img src={previewUrl} alt={attachment.name} /> : <div className="attachment-file-icon"><FileText size={17} /></div>}<div className="attachment-copy"><strong title={attachment.name}>{attachment.name}</strong><small>{attachment.size > 0 ? formatBytes(attachment.size) : 'Notion 远程附件'}</small></div><button type="button" className="plain-icon-button" aria-label={`移除 ${attachment.name}`} onClick={onRemove}><X size={14} /></button></div>
+  return <div className="attachment-item">{isImage && previewUrl ? <img src={previewUrl} alt={attachment.name} /> : <div className="attachment-file-icon"><FileText size={17} /></div>}<div className="attachment-copy"><strong title={attachment.name}>{attachment.name}</strong><small>{attachment.size > 0 ? formatBytes(attachment.size) : '远程附件'}</small></div><button type="button" className="plain-icon-button" aria-label={`移除 ${attachment.name}`} onClick={onRemove}><X size={14} /></button></div>
 }
 
 type SettingsViewProps = {
@@ -1208,12 +1329,14 @@ function DataSourceSettings({ settings, onChangeSettings, entries, onChangeEntri
     </div>
     {selectedSource.id === 'notion' && <NotionSourceSettings settings={settings} onChangeSettings={onChangeSettings} onNotice={onNotice} onReloadRemote={onReloadRemote} />}
     {selectedSource.id === 'local' && <LocalSourceSettings settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} onSelectNotion={() => update({ dataSource: 'notion' })} />}
+    {selectedSource.id === 'qiniu' && <QiniuSourceSettings settings={settings} onChangeSettings={onChangeSettings} onNotice={onNotice} onReloadRemote={onReloadRemote} />}
     {selectedSource.status === 'planned' && <PlannedSourceSettings sourceId={selectedSource.id} />}
   </>
 }
 
 function DataSourceIcon({ id }: { id: DataSourceId }) {
   if (id === 'local') return <HardDrive size={17} />
+  if (id === 'qiniu') return <Cloud size={17} />
   if (id === 'webdav') return <Cloud size={17} />
   if (id === 'obsidian') return <BookOpen size={17} />
   return <Database size={17} />
@@ -1641,6 +1764,224 @@ function LocalSourceSettings({ settings, onChangeSettings, entries, onChangeEntr
     </div>
     <div className="info-banner"><Sparkles size={16} /><span><strong>本地同步规则：</strong>CalendarMark 当前以本地记录为主；点击“拉取到本地”合并 Notion 数据，点击“推送到 Notion”将本地记录创建或更新到远端。想让每次编辑直接写远程？切换到 Notion 数据源即可。</span></div>
   </>
+}
+
+type QiniuBusyState = 'idle' | 'connecting' | 'creating'
+
+type QiniuSourceSettingsProps = {
+  settings: AppSettings
+  onChangeSettings: Dispatch<SetStateAction<AppSettings>>
+  onNotice: (message: string) => void
+  onReloadRemote?: () => void
+}
+
+function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRemote }: QiniuSourceSettingsProps) {
+  const [busy, setBusy] = useState<QiniuBusyState>('idle')
+  const [buckets, setBuckets] = useState<string[]>([])
+  const [regions, setRegions] = useState<QiniuRegionOption[]>([])
+  const [newBucketName, setNewBucketName] = useState('calendarmark')
+  const [usage, setUsage] = useState<QiniuUsage | null>(null)
+  const [usageError, setUsageError] = useState('')
+  const update = (partial: Partial<AppSettings>) => onChangeSettings((previous) => ({ ...previous, ...partial }))
+  const isConfigured = Boolean(settings.qiniuToken.trim() && settings.qiniuBucket.trim())
+
+  useEffect(() => {
+    void listQiniuRegions().then(setRegions).catch(() => setRegions([]))
+  }, [])
+
+  async function refreshUsage(token: string, bucket: string, region: string) {
+    setUsageError('')
+    try {
+      setUsage(await getQiniuUsage(token, bucket, region))
+    } catch (error) {
+      setUsage(null)
+      setUsageError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  useEffect(() => {
+    if (!isConfigured) {
+      setUsage(null)
+      return undefined
+    }
+    void refreshUsage(settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion)
+    return undefined
+  }, [settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion, isConfigured])
+
+  async function connectBuckets() {
+    if (!settings.qiniuToken.trim()) {
+      onNotice('请先填写七牛 AccessKey:SecretKey，格式：AK:SK')
+      return
+    }
+    setBusy('connecting')
+    try {
+      const list = await listQiniuBuckets(settings.qiniuToken)
+      setBuckets(list)
+      const keepBucket = list.includes(settings.qiniuBucket.trim()) ? settings.qiniuBucket.trim() : ''
+      let nextDomain = settings.qiniuDomain
+      if (keepBucket) {
+        const domains = await listQiniuBucketDomains(settings.qiniuToken, keepBucket)
+        nextDomain = domains[0] ?? nextDomain
+      }
+      update({ qiniuBucket: keepBucket, qiniuDomain: nextDomain })
+      onNotice(`已连接七牛账号，发现 ${list.length} 个空间`)
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  async function selectBucket(bucket: string) {
+    update({ qiniuBucket: bucket, qiniuDomain: '' })
+    if (!settings.qiniuToken.trim()) return
+    try {
+      const domains = await listQiniuBucketDomains(settings.qiniuToken, bucket)
+      update({ qiniuBucket: bucket, qiniuDomain: domains[0] ?? '' })
+      if (!domains.length) onNotice('空间没有可用域名；附件下载需要空间绑定域名（新空间可能需要几分钟）')
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  async function handleCreateBucket() {
+    if (!settings.qiniuToken.trim()) {
+      onNotice('请先填写七牛 AccessKey:SecretKey，再创建空间')
+      return
+    }
+    const bucket = newBucketName.trim().toLowerCase()
+    if (!bucket) {
+      onNotice('请填写要创建的空间名称')
+      return
+    }
+    setBusy('creating')
+    try {
+      await createQiniuBucket(settings.qiniuToken, bucket, settings.qiniuRegion)
+      const list = await listQiniuBuckets(settings.qiniuToken)
+      setBuckets(list)
+      const domains = await listQiniuBucketDomains(settings.qiniuToken, bucket).catch(() => [])
+      update({ qiniuBucket: bucket, qiniuDomain: domains[0] ?? '' })
+      onNotice(`已创建私有空间「${bucket}」并设为同步目标`)
+      onReloadRemote?.()
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy('idle')
+    }
+  }
+
+  return <div className="source-card source-card--qiniu">
+    <div className="source-card-top">
+      <div className="qiniu-logo">Q</div>
+      <div>
+        <strong>七牛云 Kodo 连接</strong>
+        <span>在七牛「个人中心 → 密钥管理」复制 AccessKey / SecretKey，粘贴为 AK:SK</span>
+      </div>
+      <span className="connection-badge"><span className={`status-dot ${isConfigured ? 'status-dot--ready' : ''}`} />{isConfigured ? '已连接' : '待配置'}</span>
+    </div>
+
+    <div className="source-fields">
+      <label className="field-label">
+        <span>密钥 Token（AK:SK）</span>
+        <span className="field-hint">七牛控制台 → 个人中心 → 密钥管理</span>
+      </label>
+      <input
+        className="settings-input"
+        type="password"
+        placeholder="AccessKey:SecretKey"
+        value={settings.qiniuToken}
+        onChange={(event) => update({ qiniuToken: event.target.value })}
+      />
+      <label className="field-label">
+        <span>存储区域</span>
+        <span className="field-hint">新建空间后所在区域不可修改</span>
+      </label>
+      <select className="settings-input" value={settings.qiniuRegion} onChange={(event) => update({ qiniuRegion: event.target.value })}>
+        {(regions.length ? regions : [{ id: 'z0', label: '华东-浙江' }]).map((region) => (
+          <option key={region.id} value={region.id}>{region.label}（{region.id}）</option>
+        ))}
+      </select>
+      <label className="field-label">
+        <span>存储目录前缀</span>
+        <span className="field-hint">所有数据都写在这个前缀下，可与其他应用共用空间</span>
+      </label>
+      <input
+        className="settings-input"
+        placeholder="calendarmark"
+        value={settings.qiniuPrefix}
+        onChange={(event) => update({ qiniuPrefix: event.target.value })}
+      />
+      <div className="field-label field-label--row">
+        <span>空间（Bucket）</span>
+        <button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void connectBuckets() }}>
+          <RefreshCw size={14} className={busy === 'connecting' ? 'spin' : ''} />
+          {buckets.length ? '刷新空间列表' : '连接并获取空间'}
+        </button>
+      </div>
+    </div>
+
+    {buckets.length > 0 && (
+      <div className="notion-dataset-list notion-dataset-list--compact">
+        {buckets.map((bucket) => {
+          const active = settings.qiniuBucket === bucket
+          return (
+            <div className={'notion-dataset-option' + (active ? ' notion-dataset-option--active' : '')} key={bucket}>
+              <button type="button" className="notion-dataset-select" onClick={() => { void selectBucket(bucket) }}>
+                <span className="notion-dataset-copy"><strong>{bucket}</strong><small>{active ? settings.qiniuRegion || 'z0' : '点击选择此空间'}</small></span>
+                {active && <span className="notion-dataset-current">同步目标</span>}
+              </button>
+            </div>
+          )
+        })}
+      </div>
+    )}
+
+    <div className="qiniu-create-card">
+      <div>
+        <strong>还没有专用空间？</strong>
+        <span>一键创建私有空间，CalendarMark 数据只对本应用可见，其他设备用同一密钥即可同步。</span>
+      </div>
+      <div className="qiniu-create-form">
+        <input
+          className="settings-input"
+          aria-label="新空间名称"
+          placeholder="calendarmark"
+          value={newBucketName}
+          onChange={(event) => setNewBucketName(event.target.value)}
+        />
+        <button type="button" className="primary-button" disabled={busy !== 'idle'} onClick={() => { void handleCreateBucket() }}>
+          <Upload size={15} className={busy === 'creating' ? 'spin' : ''} />
+          {busy === 'creating' ? '正在创建…' : '创建私有空间'}
+        </button>
+      </div>
+    </div>
+
+    {isConfigured && (
+      <div className="qiniu-usage-panel">
+        <div className="qiniu-usage-heading">
+          <Cloud size={15} />
+          <strong>额度用量</strong>
+          <button type="button" className="text-button" onClick={() => { void refreshUsage(settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion) }}>刷新</button>
+        </div>
+        {usage && (
+          <>
+            <p className="qiniu-usage-value">标准存储已用 {formatQiniuBytes(usage.storageBytes)}（免费额度 10 GB / 月，超量按量计费）</p>
+            <div className="qiniu-usage-bar" aria-hidden="true">
+              <span style={{ width: `${Math.min(100, Math.round((usage.storageBytes / (10 * 1024 * 1024 * 1024)) * 100))}%` }} />
+            </div>
+          </>
+        )}
+        {!usage && usageError && <p className="qiniu-usage-value qiniu-usage-value--error">{usageError}</p>}
+      </div>
+    )}
+
+    <div className="source-card-footer source-card-footer--qiniu">
+      <span>
+        <KeyRound size={15} />
+        密钥只保存在本机设置中，由 Rust 侧直接请求七牛 API；建议在七牛创建专用子账号授权，降低泄露影响。
+      </span>
+    </div>
+  </div>
 }
 
 function PlannedSourceSettings({ sourceId }: { sourceId: DataSourceId }) {

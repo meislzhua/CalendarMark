@@ -49,7 +49,7 @@ export type ThemeMode = 'light' | 'dark' | 'auto'
 /** 窗口模式：常规桌面窗口；抽屉模式：贴屏幕右侧的窄边栏（桌面端专属） */
 export type UiMode = 'window' | 'drawer'
 
-export type DataSourceId = 'notion' | 'local' | 'webdav' | 'obsidian'
+export type DataSourceId = 'notion' | 'local' | 'qiniu' | 'webdav' | 'obsidian'
 
 export type DataSourceStatus = 'active' | 'preview' | 'planned'
 
@@ -68,6 +68,11 @@ export type NotionDataset = {
   dataSourceName: string
 }
 
+export type QiniuRegionOption = {
+  id: string
+  label: string
+}
+
 export const DATA_SOURCE_DEFINITIONS: DataSourceDefinition[] = [
   {
     id: 'notion',
@@ -81,6 +86,13 @@ export const DATA_SOURCE_DEFINITIONS: DataSourceDefinition[] = [
     label: '本地存储',
     description: '离线优先，数据保存在此设备',
     detail: '当前可用 · 无需连接',
+    status: 'active',
+  },
+  {
+    id: 'qiniu',
+    label: '七牛 Kodo',
+    description: '私有对象存储空间，跨设备同步',
+    detail: '已接入 · Token 直连',
     status: 'active',
   },
   {
@@ -108,6 +120,11 @@ export type AppSettings = {
   notionDatabaseId: string
   notionDataSourceId: string
   notionDatasets: NotionDataset[]
+  qiniuToken: string
+  qiniuBucket: string
+  qiniuRegion: string
+  qiniuDomain: string
+  qiniuPrefix: string
 }
 
 export const TAG_COLORS: TagColor[] = [
@@ -135,6 +152,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   notionDatabaseId: '',
   notionDataSourceId: '',
   notionDatasets: [],
+  qiniuToken: '',
+  qiniuBucket: '',
+  qiniuRegion: 'z0',
+  qiniuDomain: '',
+  qiniuPrefix: 'calendarmark',
 }
 
 export function createId(prefix: string): string {

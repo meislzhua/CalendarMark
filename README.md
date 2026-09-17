@@ -19,6 +19,7 @@ CalendarMark 是一个基于 Tauri 2 的本地优先日历记录工具：用标�
 - **界面模式**：窗口模式为常规桌面窗口；抽屉模式（桌面端专属）切换为贴屏幕右侧的无边框窄边栏，带滑入动效，可在设置 → 界面中切换。
 - **可替换数据源**：设置页提供 Notion、本地存储和后续数据源的统一选择入口；Notion 是当前已实现的外部适配器。
 - **Notion 数据源**：选中 Notion 即远程直连，读取、保存和删除直接作用于远端；选中本地存储时，可在设置中对已配置的 Notion 数据集执行“拉取到本地 / 推送到 Notion”。
+- **七牛 Kodo 数据源**：填入七牛 AccessKey:SecretKey 即可远程直连私有对象存储空间；支持一键创建私有 `calendarmark` 空间、选择已有空间，侧栏左下角常驻显示七牛存储用量。
 - **本地优先**：MVP 使用 WebView 本地存储保存草稿，不依赖服务端即可使用。
 
 ## 技术栈
@@ -90,11 +91,14 @@ Android job 会安装 JDK 17、Android SDK platform/build-tools/NDK，并使用 
 │   ├── App.css                  # 视觉系统与响应式布局
 │   ├── types.ts                 # Entry / Tag / Attachment / Settings
 │   ├── notion.ts                # Notion IPC 类型和同步调用
+│   ├── qiniu.ts                 # 七牛 Kodo IPC 类型和同步调用
 │   ├── storage.ts               # MVP 本地存储适配层
+│   ├── data-source.ts           # 统一数据源接口（本地/Notion/七牛）
 │   └── tauri.ts                 # 桌面窗口与快捷键桥接
 ├── src-tauri/
 │   ├── src/lib.rs               # 托盘、窗口关闭策略、命令注册
 │   ├── src/notion.rs            # Notion API、字段映射、分页、文件上传
+│   ├── src/qiniu.rs             # 七牛签名、空间管理、对象读写、用量统计
 │   ├── tauri.conf.json          # 桌面/移动端构建配置
 │   └── capabilities/            # Tauri 2 权限声明
 ├── docs/
@@ -133,6 +137,28 @@ Android job 会安装 JDK 17、Android SDK platform/build-tools/NDK，并使用 
 1. 日历继续使用本机数据，保存只写入本地。
 2. “本地存储”下方只列出本机已绑定的 Notion 数据集；选择同步目标后可点击“拉取到本地”或“推送到 Notion”。Token、数据集发现和连接引导统一放在 Notion 数据源页配置。
 3. 本地模式的删除只删除本地记录，不会因为删除本地记录而自动归档远端页面；需要时再显式推送本地数据。
+
+## 七牛 Kodo 配置说明
+
+在“设置 → 数据源”中选择七牛 Kodo：
+
+1. 在七牛控制台「个人中心 → 密钥管理」复制 AccessKey 和 SecretKey，回到 CalendarMark 按 `AccessKey:SecretKey` 粘贴到 Token 输入框。
+2. 选择存储区域后点击“连接并获取空间”，账号下的空间会列出；点击任意空间即可设为同步目标。
+3. 还没有专用空间时，点击“创建私有空间”一键创建（默认名 `calendarmark`）：CalendarMark 会先创建空间再立即调用设置私有接口，确保所有内容仅授权用户可读。
+4. 存储目录前缀默认 `calendarmark`，可与其他应用共用同一个空间。
+
+选择七牛作为当前数据源时：按月读取远端、保存直接写远端、删除直接删除远端对象，行为与 Notion 直连一致。配置完成后，侧栏左下角（数据源入口上方）会常驻显示七牛标准存储用量与 10 GB 免费额度的进度条，设置页的七牛卡片中也有同样的用量面板；统计接口有约 5 分钟延迟。
+
+对象存储中的目录布局：
+
+```text
+{prefix}/date/{YYYY-MM-DD}.json        # 当天全部记录的文档
+{prefix}/files/{file_id}{.ext}         # 附件原始文件
+{prefix}/tags/{tag}/{YYYY-MM-DD}.json  # 标签 → 日期倒排索引
+{prefix}/meta/tags.json                # 标签定义（颜色/停用态）
+```
+
+按天一个 JSON 文档可以让一次保存只写一个对象，避免跨设备读改写竞态；标签索引让快捷入口只需一次前缀列举即可跨月查询。AccessKey/SecretKey 属于账号级凭据，只保存在本机并由 Rust 侧直接请求七牛 API；建议在七牛创建专用子账号授权给 CalendarMark 使用，降低泄露影响。
 
 ## 当前边界
 
