@@ -224,6 +224,43 @@ function formatQiniuBytes(bytes: number): string {
   return `${value >= 100 ? Math.round(value) : value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`
 }
 
+const QINIU_FREE_STORAGE_BYTES = 10_000_000_000
+const QINIU_FREE_CDN_ORIGIN_BYTES = 10_000_000_000
+const QINIU_FREE_GET_CALLS = 1_000_000
+const QINIU_FREE_PUT_DELETE_CALLS = 100_000
+
+function formatQiniuCount(value: number): string {
+  return Number.isFinite(value) && value > 0 ? value.toLocaleString() : '0'
+}
+
+function QiniuUsageRows({ usage }: { usage: QiniuUsage }) {
+  const metrics = [
+    { label: '标准存储', used: formatQiniuBytes(usage.storageBytes), quota: '10 GB', usedValue: usage.storageBytes, quotaValue: QINIU_FREE_STORAGE_BYTES },
+    { label: 'GET 请求', used: formatQiniuCount(usage.getCalls), quota: '100 万次', usedValue: usage.getCalls, quotaValue: QINIU_FREE_GET_CALLS },
+    { label: 'PUT/DELETE 请求', used: formatQiniuCount(usage.putDeleteCalls), quota: '10 万次', usedValue: usage.putDeleteCalls, quotaValue: QINIU_FREE_PUT_DELETE_CALLS },
+    { label: 'CDN 回源流量', used: formatQiniuBytes(usage.cdnOriginFlowBytes), quota: '10 GB', usedValue: usage.cdnOriginFlowBytes, quotaValue: QINIU_FREE_CDN_ORIGIN_BYTES },
+    { label: '外网流出流量', used: formatQiniuBytes(usage.outboundFlowBytes), quota: '', usedValue: usage.outboundFlowBytes, quotaValue: 0 },
+  ]
+  return (
+    <div className="qiniu-usage-metrics">
+      {metrics.map((metric) => (
+        <div className="qiniu-usage-metric" key={metric.label}>
+          <div className="qiniu-usage-metric-top">
+            <span>{metric.label}</span>
+            <strong>{metric.used}</strong>
+          </div>
+          {metric.quotaValue > 0 && (
+            <div className="qiniu-usage-bar" aria-hidden="true">
+              <span style={{ width: `${Math.min(100, Math.round((metric.usedValue / metric.quotaValue) * 100))}%` }} />
+            </div>
+          )}
+          <small>{metric.quotaValue > 0 ? `免费额度 ${metric.quota} / 月` : '按量计费，未列免费额度'}</small>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function withNotionDataset(settings: AppSettings, dataset: NotionDataset): AppSettings {
   const datasets = settings.notionDatasets ?? []
   const datasetKey = notionDatasetKey(dataset)
@@ -468,16 +505,21 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [notice])
 
-  // 七牛额度用量：配置好七牛数据源后，在左下角数据源入口上方常驻显示。
+  // 仅当前数据源为七牛时读取账号额度，避免切到 Notion/本地后仍显示或请求七牛。
   useEffect(() => {
-    if (!settings.qiniuAccessKey.trim() || !settings.qiniuSecretKey.trim() || !settings.qiniuBucket.trim()) {
+    if (
+      settings.dataSource !== 'qiniu'
+      || !settings.qiniuAccessKey.trim()
+      || !settings.qiniuSecretKey.trim()
+      || !settings.qiniuBucket.trim()
+    ) {
       setQiniuUsage(null)
       setQiniuUsageState('idle')
       return undefined
     }
     let cancelled = false
     setQiniuUsageState('loading')
-    getQiniuUsage(settings.qiniuAccessKey, settings.qiniuSecretKey, settings.qiniuBucket, settings.qiniuRegion)
+    getQiniuUsage(settings.qiniuAccessKey, settings.qiniuSecretKey)
       .then((usage) => {
         if (cancelled) return
         setQiniuUsage(usage)
@@ -788,24 +830,17 @@ function App() {
         </div>
 
         <div className="sidebar-footer">
-          {settings.qiniuAccessKey.trim() && settings.qiniuSecretKey.trim() && settings.qiniuBucket.trim() && (
+          {settings.dataSource === 'qiniu' && settings.qiniuAccessKey.trim() && settings.qiniuSecretKey.trim() && settings.qiniuBucket.trim() && (
             <div className="qiniu-usage-card" role="status">
               <div className="qiniu-usage-heading">
                 <Cloud size={14} />
-                <span>七牛额度用量</span>
+                <span>七牛账号本月用量</span>
                 <span className={`status-dot ${qiniuUsageState === 'ready' ? 'status-dot--ready' : qiniuUsageState === 'error' ? 'status-dot--error' : ''}`} />
               </div>
               {qiniuUsageState === 'loading' && <p className="qiniu-usage-value">正在读取…</p>}
               {qiniuUsageState === 'error' && <p className="qiniu-usage-value qiniu-usage-value--error">读取失败，点击刷新重试</p>}
               {qiniuUsageState === 'ready' && qiniuUsage && (
-                <>
-                  <p className="qiniu-usage-value">
-                    已用 {formatQiniuBytes(qiniuUsage.storageBytes)} / 免费 10 GB
-                  </p>
-                  <div className="qiniu-usage-bar" aria-hidden="true">
-                    <span style={{ width: `${Math.min(100, Math.round((qiniuUsage.storageBytes / (10 * 1024 * 1024 * 1024)) * 100))}%` }} />
-                  </div>
-                </>
+                <QiniuUsageRows usage={qiniuUsage} />
               )}
               <button
                 type="button"
@@ -813,7 +848,7 @@ function App() {
                 onClick={() => {
                   if (qiniuUsageState === 'loading') return
                   setQiniuUsageState('loading')
-                  getQiniuUsage(settings.qiniuAccessKey, settings.qiniuSecretKey, settings.qiniuBucket, settings.qiniuRegion)
+                  getQiniuUsage(settings.qiniuAccessKey, settings.qiniuSecretKey)
                     .then((usage) => {
                       setQiniuUsage(usage)
                       setQiniuUsageState('ready')
@@ -1794,10 +1829,10 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
     void listQiniuRegions().then(setRegions).catch(() => setRegions([]))
   }, [])
 
-  async function refreshUsage(ak: string, sk: string, bucket: string, region: string) {
+  async function refreshUsage(ak: string, sk: string) {
     setUsageError('')
     try {
-      setUsage(await getQiniuUsage(ak, sk, bucket, region))
+      setUsage(await getQiniuUsage(ak, sk))
     } catch (error) {
       setUsage(null)
       setUsageError(error instanceof Error ? error.message : String(error))
@@ -1809,9 +1844,9 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
       setUsage(null)
       return undefined
     }
-    void refreshUsage(accessKey, secretKey, settings.qiniuBucket, settings.qiniuRegion)
+    void refreshUsage(accessKey, secretKey)
     return undefined
-  }, [accessKey, secretKey, settings.qiniuBucket, settings.qiniuRegion, isConfigured])
+  }, [accessKey, secretKey, isConfigured])
 
   async function connectBuckets() {
     if (!accessKey) {
@@ -1990,16 +2025,11 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
       <div className="qiniu-usage-panel">
         <div className="qiniu-usage-heading">
           <Cloud size={15} />
-          <strong>额度用量</strong>
-          <button type="button" className="text-button" onClick={() => { void refreshUsage(accessKey, secretKey, settings.qiniuBucket, settings.qiniuRegion) }}>刷新</button>
+          <strong>账号本月用量</strong>
+          <button type="button" className="text-button" onClick={() => { void refreshUsage(accessKey, secretKey) }}>刷新</button>
         </div>
         {usage && (
-          <>
-            <p className="qiniu-usage-value">标准存储已用 {formatQiniuBytes(usage.storageBytes)}（免费额度 10 GB / 月，超量按量计费）</p>
-            <div className="qiniu-usage-bar" aria-hidden="true">
-              <span style={{ width: `${Math.min(100, Math.round((usage.storageBytes / (10 * 1024 * 1024 * 1024)) * 100))}%` }} />
-            </div>
-          </>
+          <QiniuUsageRows usage={usage} />
         )}
         {!usage && usageError && <p className="qiniu-usage-value qiniu-usage-value--error">{usageError}</p>}
       </div>

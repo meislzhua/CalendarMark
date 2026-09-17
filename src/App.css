@@ -311,6 +311,38 @@ body {
   background: linear-gradient(90deg, #6cae8c, #4d8f8a);
 }
 
+.qiniu-usage-metrics {
+  display: grid;
+  gap: 7px;
+}
+
+.qiniu-usage-metric {
+  display: grid;
+  gap: 3px;
+}
+
+.qiniu-usage-metric-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.qiniu-usage-metric-top span {
+  color: var(--ink-muted);
+}
+
+.qiniu-usage-metric-top strong {
+  color: var(--ink);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.qiniu-usage-metric small {
+  color: var(--ink-faint);
+  font-size: 9px;
+}
+
 .qiniu-usage-refresh {
   display: inline-flex;
   align-items: center;
@@ -1721,6 +1753,12 @@ input::placeholder {
 .qiniu-usage-panel .qiniu-usage-heading {
   justify-content: flex-start;
   gap: 7px;
+}
+
+.qiniu-usage-panel .qiniu-usage-metric-top strong,
+.qiniu-usage-panel .qiniu-usage-metric-top span,
+.qiniu-usage-panel .qiniu-usage-metric small {
+  font-size: 11px;
 }
 
 .source-card-top > div:nth-child(2) {

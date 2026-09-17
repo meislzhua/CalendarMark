@@ -57,7 +57,7 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 
 ### `src/qiniu.ts`
 
-七牛 Kodo IPC 封装：列出/创建空间（创建后自动设为私有）、获取空间域名、读取用量、列举对象键、读写对象、签名下载链接和删除对象。前端不持有密钥签名逻辑，只透传用户配置。
+七牛 Kodo IPC 封装：列出/创建空间（创建后自动设为私有）、获取空间域名、读取账号级多维用量、列举对象键、读写对象、签名下载链接和删除对象。前端不持有密钥签名逻辑，只透传用户配置。
 
 ### `src/data-source.ts`
 
@@ -116,12 +116,13 @@ Android 不创建桌面托盘，相关代码由 `#[cfg(desktop)]` 排除；React
 
 `src-tauri/src/qiniu.rs` 同样基于 `reqwest` + Rustls，不引入七牛 SDK，签名算法按官方文档实现（`hmac` + `sha1` + URL-safe Base64）：
 
-- 管理凭证（`Authorization: Qiniu AK:sign`）：签名串 = `Method Path?Query\nHost: host\n[Content-Type: ct]\n\n[body]`，用于空间列表、创建空间、设为私有、空间域名和 `/v6/space` 用量统计。
+- 管理凭证（`Authorization: Qiniu AK:sign`）：签名串 = `Method Path?Query\nHost: host\n[Content-Type: ct]\n\n[body]`，用于空间管理、对象管理和账号级用量统计。
 - URL-safe Base64 必须保留 `=` padding（与官方 SDK 的 `base64.URLEncoding` 一致）：HMAC-SHA1 签名编码后为 28 字符；去掉 padding 会被服务端判定 bad token（401）。
 - 上传凭证（表单上传）：`AK:urlsafe(HMAC-SHA1(encodedPolicy)):urlsafe(policy)`，policy 限定 `scope=bucket:key` 与 deadline，按区域选择上传域名。
 - 下载凭证（私有空间）：`domain/key?e=deadline&token=AK:sign`，纯本地 HMAC 计算，无需网络请求即可生成附件预览/外链。
 - 对象管理：v1 `POST {rsf.qiniu.com}/list` 前缀列举、`POST {rs.qiniu.com}/delete/<EncodedEntryURI>` 删除（612 幂等处理），读取经签名下载链接取回内容。rs/rsf 使用中心域名自动路由到空间真实区域，避免用户选错区域导致 `incorrect zone`。
-- 区域自动识别：选择空间时调用 `GET /v2/query?ak=&bucket=` 获取空间真实区域（如 z2）并写回设置；上传域名与 `/v6/space` 用量统计都依赖正确区域（区域错误时用量会静默返回 0）。
+- 区域自动识别：选择空间时调用 `GET /v2/query?ak=&bucket=` 获取空间真实区域（如 z2）并写回设置；上传域名依赖正确区域。用量统计不传 `$bucket/$region`，直接读取整个账号的汇总值。
+- 账号级用量并发调用 `/v6/space`、`/v6/blob_io?select=hits&$metric=hits`、`/v6/rs_put?select=hits`、`/v6/blob_io?select=flow&$metric=cdn_flow_out` 和 `/v6/blob_io?select=flow&$metric=flow_out`；时间范围是中国时区本月 1 日至今，请求数/流量按天求和，存储取最后快照。单个指标失败时先降级为 0，全部失败才向 UI 报错。
 - `mkbucketv3` 创建空间成功后立即调用 `/private?bucket=..&private=1`，保证快捷创建的空间一定是私有空间。
 
 ## 4. 数据模型
@@ -191,7 +192,7 @@ Notion 远程直连
 
 远端页面 ID 保存在 `CalendarEntry.remote`，写入时据此决定创建还是更新；本地模式的拉取采用合并策略，不会删除本地未出现在远端结果中的条目。当前不会后台持续监听 Notion 的外部修改，外部改动需要点击“重新读取”刷新，也不提供自动冲突解决。
 
-七牛远程直连的运行语义与 Notion 相同：启动/切换/刷新时按月读取 `date/` 文档，保存记录时上传新增附件并写当天文档，删除记录时清理附件对象和标签索引；侧栏数据源入口上方常驻显示七牛标准存储用量（来自 `/v6/space`，统计延迟约 5 分钟）。
+七牛远程直连的运行语义与 Notion 相同：启动/切换/刷新时按月读取 `date/` 文档，保存记录时上传新增附件并写当天文档，删除记录时清理附件对象和标签索引。仅当前数据源为七牛时，侧栏数据源入口上方显示账号本月标准存储、GET、PUT/DELETE、CDN 回源与外网流出用量；切到 Notion/本地时不显示也不请求。
 
 ## 6. 权限和安全
 

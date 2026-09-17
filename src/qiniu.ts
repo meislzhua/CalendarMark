@@ -4,6 +4,10 @@ import type { QiniuRegionOption } from './types'
 
 export type QiniuUsage = {
   storageBytes: number
+  getCalls: number
+  putDeleteCalls: number
+  cdnOriginFlowBytes: number
+  outboundFlowBytes: number
   updatedAt: number
 }
 
@@ -67,9 +71,9 @@ export async function queryQiniuBucketRegion(accessKey: string, secretKey: strin
   return invoke<string>('qiniu_query_region', { raw: raw(accessKey, secretKey), bucket })
 }
 
-export async function getQiniuUsage(accessKey: string, secretKey: string, bucket: string, region: string): Promise<QiniuUsage> {
+export async function getQiniuUsage(accessKey: string, secretKey: string): Promise<QiniuUsage> {
   ensureTauriRuntime()
-  return invoke<QiniuUsage>('qiniu_get_usage', { raw: raw(accessKey, secretKey), bucket, region })
+  return invoke<QiniuUsage>('qiniu_get_usage', { raw: raw(accessKey, secretKey) })
 }
 
 export async function listQiniuKeys(accessKey: string, secretKey: string, bucket: string, region: string, prefix: string): Promise<string[]> {

@@ -71,6 +71,10 @@ type HmacSha1 = Hmac<Sha1>;
 #[serde(rename_all = "camelCase")]
 pub struct QiniuUsage {
     pub storage_bytes: u64,
+    pub get_calls: u64,
+    pub put_delete_calls: u64,
+    pub cdn_origin_flow_bytes: u64,
+    pub outbound_flow_bytes: u64,
     pub updated_at: i64,
 }
 
@@ -102,10 +106,14 @@ impl QiniuCredential {
             return Err("请完整填写七牛 AccessKey 和 SecretKey。".to_string());
         }
         if !valid_key(access_key) {
-            return Err("AccessKey 格式不正确：请复制个人中心「密钥管理」中的 AccessKey。".to_string());
+            return Err(
+                "AccessKey 格式不正确：请复制个人中心「密钥管理」中的 AccessKey。".to_string(),
+            );
         }
         if !valid_key(secret_key) {
-            return Err("SecretKey 格式不正确：请复制个人中心「密钥管理」中的 SecretKey。".to_string());
+            return Err(
+                "SecretKey 格式不正确：请复制个人中心「密钥管理」中的 SecretKey。".to_string(),
+            );
         }
         Ok(Self {
             access_key: access_key.to_string(),
@@ -126,8 +134,8 @@ fn parse_credential(raw: &QiniuRawCredential) -> Result<QiniuCredential, String>
 }
 
 fn hmac_sha1_urlsafe(secret_key: &str, data: &str) -> String {
-    let mut mac = HmacSha1::new_from_slice(secret_key.as_bytes())
-        .expect("HMAC-SHA1 accepts any key length");
+    let mut mac =
+        HmacSha1::new_from_slice(secret_key.as_bytes()).expect("HMAC-SHA1 accepts any key length");
     mac.update(data.as_bytes());
     // 官方 SDK 使用带 padding 的 URL-safe Base64（URLEncoding）。
     // HMAC-SHA1 签名编码后是 28 字符、以 "=" 结尾；去掉 padding 会被七牛判定为 bad token（401）。
@@ -174,18 +182,10 @@ fn management_authorization(
     content_type: Option<&str>,
     body: Option<&str>,
 ) -> String {
-    let signing = build_management_signing_string(
-        method,
-        path_with_query,
-        host,
-        content_type,
-        body,
-    );
+    let signing =
+        build_management_signing_string(method, path_with_query, host, content_type, body);
     let encoded_sign = hmac_sha1_urlsafe(&credential.secret_key, &signing);
-    format!(
-        "Qiniu {}:{encoded_sign}",
-        credential.access_key
-    )
+    format!("Qiniu {}:{encoded_sign}", credential.access_key)
 }
 
 fn now_unix() -> u64 {
@@ -236,7 +236,15 @@ fn normalize_download_domain(domain: &str) -> String {
     }
 }
 
-fn region_config(region: &str) -> (&'static str, &'static str, &'static str, &'static str, &'static str) {
+fn region_config(
+    region: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
     // 兼容旧文档中出现过的 cn-east-2a 写法
     let normalized = if region.trim() == "cn-east-2a" {
         "cn-east-2"
@@ -304,8 +312,7 @@ async fn management_request(
         credential,
         method.as_str(),
         path_with_query,
-        host
-            .trim_start_matches("https://")
+        host.trim_start_matches("https://")
             .trim_start_matches("http://"),
         Some("application/x-www-form-urlencoded"),
         body,
@@ -358,15 +365,8 @@ fn format_qiniu_error(context: &str, status: StatusCode, body: &str) -> String {
 pub async fn qiniu_list_buckets(raw: QiniuRawCredential) -> Result<Vec<String>, String> {
     let credential = parse_credential(&raw)?;
     let client = qiniu_client()?;
-    let (status, body) = management_request(
-        &client,
-        &credential,
-        UC_HOST,
-        Method::GET,
-        "/buckets",
-        None,
-    )
-    .await?;
+    let (status, body) =
+        management_request(&client, &credential, UC_HOST, Method::GET, "/buckets", None).await?;
     if !status.is_success() {
         return Err(format_qiniu_error("获取空间列表失败", status, &body));
     }
@@ -415,16 +415,12 @@ pub async fn qiniu_create_bucket(
     }
 
     // mkbucketv3 默认创建公开空间；CalendarMark 数据必须私有，立即改为私有。
-    let query = format!("/private?bucket={}&private=1", url_encode_component(&bucket));
-    let (status, body) = management_request(
-        &client,
-        &credential,
-        UC_HOST,
-        Method::POST,
-        &query,
-        None,
-    )
-    .await?;
+    let query = format!(
+        "/private?bucket={}&private=1",
+        url_encode_component(&bucket)
+    );
+    let (status, body) =
+        management_request(&client, &credential, UC_HOST, Method::POST, &query, None).await?;
     if !status.is_success() {
         return Err(format_qiniu_error(
             "空间已创建，但设置为私有失败，请在七牛控制台手动改为私有",
@@ -436,12 +432,15 @@ pub async fn qiniu_create_bucket(
 }
 
 #[tauri::command]
-pub async fn qiniu_bucket_domains(raw: QiniuRawCredential, bucket: String) -> Result<Vec<String>, String> {
+pub async fn qiniu_bucket_domains(
+    raw: QiniuRawCredential,
+    bucket: String,
+) -> Result<Vec<String>, String> {
     let credential = parse_credential(&raw)?;
     let client = qiniu_client()?;
     let query = format!("/v2/domains?tbl={}", url_encode_component(bucket.trim()));
-    let (status, body) = management_request(&client, &credential, UC_HOST, Method::GET, &query, None)
-        .await?;
+    let (status, body) =
+        management_request(&client, &credential, UC_HOST, Method::GET, &query, None).await?;
     if !status.is_success() {
         return Err(format_qiniu_error("获取空间域名失败", status, &body));
     }
@@ -452,10 +451,7 @@ pub async fn qiniu_bucket_domains(raw: QiniuRawCredential, bucket: String) -> Re
 /// 通过 UC /v2/query 自动识别空间所在区域（如 z0/z2），
 /// 用于上传域名选择和用量统计，避免用户手选区域出错。
 #[tauri::command]
-pub async fn qiniu_query_region(
-    raw: QiniuRawCredential,
-    bucket: String,
-) -> Result<String, String> {
+pub async fn qiniu_query_region(raw: QiniuRawCredential, bucket: String) -> Result<String, String> {
     let credential = parse_credential(&raw)?;
     let bucket = bucket.trim().to_string();
     if bucket.is_empty() {
@@ -472,8 +468,8 @@ pub async fn qiniu_query_region(
     if !status.is_success() {
         return Err(format_qiniu_error("识别空间区域失败", status, &body));
     }
-    let parsed: Value = serde_json::from_str(&body)
-        .map_err(|error| format!("解析空间区域失败：{error}"))?;
+    let parsed: Value =
+        serde_json::from_str(&body).map_err(|error| format!("解析空间区域失败：{error}"))?;
     let region = parsed
         .get("region")
         .and_then(Value::as_str)
@@ -534,62 +530,146 @@ fn format_stats_time(timestamp: u64) -> String {
     )
 }
 
-#[tauri::command]
-pub async fn qiniu_get_usage(
-    raw: QiniuRawCredential,
-    bucket: String,
-    region: String,
-) -> Result<QiniuUsage, String> {
-    let credential = parse_credential(&raw)?;
-    let bucket = bucket.trim().to_string();
-    if bucket.is_empty() {
-        return Err("请先选择七牛空间。".to_string());
-    }
-    let now = now_unix();
-    let begin = format_stats_time(now.saturating_sub(2 * 86400));
-    let end = format_stats_time(now + 600);
-    let query = format!(
-        "/v6/space?bucket={}&region={}&begin={}&end={}&g=day",
-        url_encode_component(&bucket),
-        url_encode_component(region.trim()),
-        begin,
-        end
-    );
-    let client = qiniu_client()?;
-    let (status, body) =
-        management_request(&client, &credential, API_HOST, Method::GET, &query, None).await?;
-    if !status.is_success() {
-        return Err(format_qiniu_error("读取七牛用量失败", status, &body));
-    }
-    let parsed: Value = serde_json::from_str(&body)
-        .map_err(|error| format!("解析七牛用量失败：{error}"))?;
-    let times: Vec<i64> = parsed
+fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
+    let year = year as i64;
+    let month = month as i64;
+    let day = day as i64;
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let mp = ((month + 9) % 12) as u64;
+    let doy = (153 * mp + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era as i64 * 146097 + doe as i64 - 719468) as u64
+}
+
+/// 七牛按 UTC 时间查询，但账号免费额度按中国时区自然月重置。
+fn current_billing_month_start(now: u64) -> u64 {
+    const CHINA_OFFSET_SECONDS: u64 = 8 * 60 * 60;
+    let local_now = format_stats_time(now + CHINA_OFFSET_SECONDS);
+    let year = local_now[..4].parse::<u64>().unwrap_or(1970);
+    let month = local_now[4..6].parse::<u64>().unwrap_or(1);
+    (days_from_civil(year, month, 1) * 86400).saturating_sub(CHINA_OFFSET_SECONDS)
+}
+
+fn parse_space_usage(body: &str, now: u64) -> Result<(u64, i64), String> {
+    let parsed: Value =
+        serde_json::from_str(body).map_err(|error| format!("解析七牛存储用量失败：{error}"))?;
+    let times = parsed
         .get("times")
         .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_i64)
-                .collect::<Vec<_>>()
-        })
+        .map(|values| values.iter().filter_map(Value::as_i64).collect::<Vec<_>>())
         .unwrap_or_default();
-    let datas: Vec<u64> = parsed
+    let datas = parsed
         .get("datas")
         .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_u64)
-                .collect::<Vec<_>>()
-        })
+        .map(|values| values.iter().filter_map(Value::as_u64).collect::<Vec<_>>())
         .unwrap_or_default();
-    if datas.is_empty() {
-        return Err("七牛还没有这个空间的存储统计数据（统计延迟约 5 分钟），请稍后再试。".to_string());
+    let storage_bytes = datas.last().copied().unwrap_or(0);
+    Ok((storage_bytes, times.last().copied().unwrap_or(now as i64)))
+}
+
+fn parse_metric_total(body: &str, field: &str) -> Result<u64, String> {
+    let parsed: Value =
+        serde_json::from_str(body).map_err(|error| format!("解析七牛统计用量失败：{error}"))?;
+    let items = parsed
+        .as_array()
+        .ok_or_else(|| "七牛统计接口返回格式不正确。".to_string())?;
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            item.get("values")
+                .and_then(|values| values.get(field))
+                .and_then(Value::as_u64)
+        })
+        .fold(0_u64, u64::saturating_add))
+}
+
+#[tauri::command]
+pub async fn qiniu_get_usage(raw: QiniuRawCredential) -> Result<QiniuUsage, String> {
+    let credential = parse_credential(&raw)?;
+    let now = now_unix();
+    let begin = format_stats_time(current_billing_month_start(now));
+    let end = format_stats_time(now + 600);
+    let client = qiniu_client()?;
+
+    // 不传 $bucket/$region 时，统计接口返回整个账号的汇总数据。
+    let queries = [
+        (
+            "标准存储",
+            format!("/v6/space?begin={begin}&end={end}&g=day"),
+        ),
+        (
+            "GET 请求",
+            format!("/v6/blob_io?begin={begin}&end={end}&g=day&select=hits&$metric=hits"),
+        ),
+        (
+            "PUT/DELETE 请求",
+            format!("/v6/rs_put?begin={begin}&end={end}&g=day&select=hits"),
+        ),
+        (
+            "CDN 回源流量",
+            format!("/v6/blob_io?begin={begin}&end={end}&g=day&select=flow&$metric=cdn_flow_out"),
+        ),
+        (
+            "外网流出流量",
+            format!("/v6/blob_io?begin={begin}&end={end}&g=day&select=flow&$metric=flow_out"),
+        ),
+    ];
+
+    let client_ref = &client;
+    let credential_ref = &credential;
+    let futures = queries.iter().map(|(name, query)| async move {
+        let (status, body) = management_request(
+            client_ref,
+            credential_ref,
+            API_HOST,
+            Method::GET,
+            query,
+            None,
+        )
+        .await?;
+        if !status.is_success() {
+            return Err(format_qiniu_error(
+                &format!("读取七牛{name}用量失败"),
+                status,
+                &body,
+            ));
+        }
+        Ok(body)
+    });
+    let results = join_all(futures).await;
+    let mut errors = Vec::new();
+    let bodies = results
+        .into_iter()
+        .map(|result| {
+            result.unwrap_or_else(|error| {
+                errors.push(error);
+                String::new()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if bodies.iter().all(|body| body.is_empty()) {
+        return Err(errors
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "七牛没有返回任何账号用量数据。".to_string()));
     }
-    let storage_bytes = datas[datas.len() - 1];
-    let updated_at = times.last().copied().unwrap_or(now as i64);
+
+    // 单个指标暂不可用时不阻塞其它指标；实际错误仍在所有指标均失败时返回。
+    let (storage_bytes, updated_at) = parse_space_usage(&bodies[0], now).unwrap_or((0, now as i64));
+    let get_calls = parse_metric_total(&bodies[1], "hits").unwrap_or(0);
+    let put_delete_calls = parse_metric_total(&bodies[2], "hits").unwrap_or(0);
+    let cdn_origin_flow_bytes = parse_metric_total(&bodies[3], "flow").unwrap_or(0);
+    let outbound_flow_bytes = parse_metric_total(&bodies[4], "flow").unwrap_or(0);
+
     Ok(QiniuUsage {
         storage_bytes,
+        get_calls,
+        put_delete_calls,
+        cdn_origin_flow_bytes,
+        outbound_flow_bytes,
         updated_at,
     })
 }
@@ -613,9 +693,15 @@ async fn list_object_keys(
             LIST_PAGE_SIZE,
             url_encode_component(&marker)
         );
-        let (status, body) =
-            management_request(client, credential, RSF_CENTRAL_HOST, Method::POST, &query, None)
-                .await?;
+        let (status, body) = management_request(
+            client,
+            credential,
+            RSF_CENTRAL_HOST,
+            Method::POST,
+            &query,
+            None,
+        )
+        .await?;
         if !status.is_success() {
             return Err(format_qiniu_error("读取对象列表失败", status, &body));
         }
@@ -670,7 +756,9 @@ async fn fetch_object_bytes(
         return Ok(None);
     }
     if response.status() == StatusCode::UNAUTHORIZED {
-        return Err(format!("下载 {key} 失败：下载凭证被拒绝，请检查密钥与空间域名。"));
+        return Err(format!(
+            "下载 {key} 失败：下载凭证被拒绝，请检查密钥与空间域名。"
+        ));
     }
     if !response.status().is_success() {
         return Err(format!(
@@ -749,7 +837,11 @@ pub async fn qiniu_get_attachment_data_url(
     Ok(bytes.map(|bytes| {
         format!(
             "data:{};base64,{}",
-            if mime_type.is_empty() { "application/octet-stream".to_string() } else { mime_type },
+            if mime_type.is_empty() {
+                "application/octet-stream".to_string()
+            } else {
+                mime_type
+            },
             BASE64.encode(bytes)
         )
     }))
@@ -820,7 +912,11 @@ pub async fn qiniu_put_object(
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format_qiniu_error(&format!("上传 {key} 失败"), status, &body));
+        return Err(format_qiniu_error(
+            &format!("上传 {key} 失败"),
+            status,
+            &body,
+        ));
     }
     Ok(())
 }
@@ -849,7 +945,11 @@ pub async fn qiniu_delete_object(
     if status.is_success() || status.as_u16() == 612 {
         return Ok(());
     }
-    Err(format_qiniu_error(&format!("删除 {key} 失败"), status, &body))
+    Err(format_qiniu_error(
+        &format!("删除 {key} 失败"),
+        status,
+        &body,
+    ))
 }
 
 /// 并发读取一组小 JSON 对象（日期文档/标签索引），不存在的键返回 None。
@@ -905,8 +1005,14 @@ mod tests {
         raw.access_key = format!(" {} ", raw.access_key);
         raw.secret_key = format!("\n{}\n", raw.secret_key);
         let credential = parse_credential(&raw).unwrap();
-        assert_eq!(credential.access_key, "AKTEST0000000000000000000000000000000000");
-        assert_eq!(credential.secret_key, "SKTEST0000000000000000000000000000000000000");
+        assert_eq!(
+            credential.access_key,
+            "AKTEST0000000000000000000000000000000000"
+        );
+        assert_eq!(
+            credential.secret_key,
+            "SKTEST0000000000000000000000000000000000000"
+        );
     }
 
     #[test]
@@ -963,12 +1069,72 @@ mod tests {
     }
 
     #[test]
+    fn parses_account_space_usage() {
+        let (storage, updated_at) = parse_space_usage(
+            r#"{"times":[1767196800,1767283200],"datas":[1024,4096]}"#,
+            200,
+        )
+        .unwrap();
+        assert_eq!(storage, 4096);
+        assert_eq!(updated_at, 1767283200);
+    }
+
+    #[test]
+    fn parses_empty_account_space_usage_as_zero() {
+        let (storage, updated_at) = parse_space_usage(r#"{"times":[],"datas":[]}"#, 200).unwrap();
+        assert_eq!(storage, 0);
+        assert_eq!(updated_at, 200);
+    }
+
+    #[test]
+    fn sums_daily_metric_values() {
+        let body = r#"[
+            {"time":"2026-09-01T00:00:00+08:00","values":{"hits":12,"flow":34}},
+            {"time":"2026-09-02T00:00:00+08:00","values":{"hits":30,"flow":56}},
+            {"time":"2026-09-03T00:00:00+08:00","values":{"flow":78}}
+        ]"#;
+        assert_eq!(parse_metric_total(body, "hits").unwrap(), 42);
+        assert_eq!(parse_metric_total(body, "flow").unwrap(), 168);
+        assert_eq!(parse_metric_total("[]", "hits").unwrap(), 0);
+    }
+
+    #[test]
+    fn billing_month_start_uses_china_calendar_month() {
+        // 2026-02-16 00:00:00 UTC = 当天 08:00 中国时间。
+        let begin = current_billing_month_start(1_771_200_000);
+        assert_eq!(format_stats_time(begin), "20260131160000");
+    }
+
+    // 可选真实接口冒烟：QINIU_ACCESS_KEY=... QINIU_SECRET_KEY=... cargo test -- --ignored
+    #[test]
+    #[ignore]
+    fn reads_real_account_usage_when_credentials_are_provided() {
+        let Ok(access_key) = std::env::var("QINIU_ACCESS_KEY") else {
+            return;
+        };
+        let Ok(secret_key) = std::env::var("QINIU_SECRET_KEY") else {
+            return;
+        };
+        let usage = tauri::async_runtime::block_on(qiniu_get_usage(QiniuRawCredential {
+            access_key,
+            secret_key,
+        }))
+        .expect("读取七牛账号用量");
+        assert!(usage.storage_bytes > 0);
+    }
+
+    #[test]
     fn builds_upload_token_with_policy() {
         let credential = QiniuCredential {
             access_key: "ak".repeat(20),
             secret_key: "sk".repeat(20),
         };
-        let token = build_upload_token(&credential, "calendarmark", "date/2026-09-17.json", 1900000000);
+        let token = build_upload_token(
+            &credential,
+            "calendarmark",
+            "date/2026-09-17.json",
+            1900000000,
+        );
         let parts: Vec<&str> = token.splitn(3, ':').collect();
         assert_eq!(parts[0], "ak".repeat(20));
         assert_eq!(parts[1].len(), 28);
