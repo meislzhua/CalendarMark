@@ -1,6 +1,6 @@
 [package]
 name = "calendarmark"
-version = "0.3.1"
+version = "0.3.2"
 description = "A calm, local-first calendar journal built with Tauri 2"
 authors = ["meislzhua"]
 license = "MIT"
