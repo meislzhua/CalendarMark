@@ -97,7 +97,7 @@ Rust 侧 `notion_pull_entries` 接受可选 query（日期区间 + 标签），�
 5. 托盘“设置”显示窗口并 emit `calendar-mark:open-settings`。
 6. 托盘“退出”调用 `app.exit(0)`。
 7. 拦截主窗口 `CloseRequested`，改为 `hide()`。
-8. 注册 Notion / 七牛命令，将 Token 留在 Rust 命令调用边界内，不把这些 API 请求放进 React WebView。
+8. 注册 Notion 命令，将 Token 留在 Rust 命令调用边界内，不把这些 API 请求放进 React WebView；七牛命令当前不再注册。
 
 `src-tauri/src/notion.rs` 使用 `reqwest` + Rustls 调用 Notion REST API，当前实现：
 
@@ -163,7 +163,7 @@ type Attachment = {
 DataSourceDefinition[]
 ├── Notion          active   → Token / 数据集发现与选择 / 同步操作
 ├── 本地存储         active   → 无需配置
-├── 七牛 Kodo        active   → AccessKey + SecretKey / 区域 / 空间选择与一键私有创建
+├── 七牛 Kodo        planned  → 暂时下线；旧配置回落本地，适配代码保留
 ├── WebDAV           planned
 └── Obsidian Vault   planned
 ```
@@ -192,7 +192,7 @@ Notion 远程直连
 
 远端页面 ID 保存在 `CalendarEntry.remote`，写入时据此决定创建还是更新；本地模式的拉取采用合并策略，不会删除本地未出现在远端结果中的条目。当前不会后台持续监听 Notion 的外部修改，外部改动需要点击“重新读取”刷新，也不提供自动冲突解决。
 
-七牛远程直连的运行语义与 Notion 相同：启动/切换/刷新时按月读取 `date/` 文档，保存记录时上传新增附件并写当天文档，删除记录时清理附件对象和标签索引。仅当前数据源为七牛时，侧栏数据源入口上方显示账号本月标准存储、GET、PUT/DELETE、CDN 回源与外网流出用量；切到 Notion/本地时不显示也不请求。
+七牛适配器暂时下线：设置入口显示为规划中，`loadSettings` 会把旧的 `dataSource: qiniu` 自动回落为 `local`，本地同步目标也不再生成七牛项。相关 Rust/TS 适配代码保留用于后续评估新的缓存与计费方案，但当前 UI 不提供直连或手动同步入口，也不会发起七牛请求。
 
 ## 6. 权限和安全
 
@@ -201,7 +201,7 @@ Notion 远程直连
 - CSP 当前为 `null` 以支持 Vite/Tauri MVP；Notion 请求已经放入 Rust，生产发布仍应收紧 WebView CSP。
 - 当前 Token 随 `AppSettings` 保存在 WebView localStorage，方便 MVP 使用但不是系统级密钥链；正式发布前应迁移到 Tauri Store 的安全后端或系统 Keychain。
 - Notion Token 不发送给 CalendarMark 服务。拉取的文件 URL 是 Notion 返回的临时 URL；本地附件先作为 Data URL 保存并在推送时通过 File Upload API 上传，后续应把附件迁移到应用数据目录。
-- 七牛 AccessKey/SecretKey 是账号级凭据，同样只保存在本机、只由 Rust 侧直接请求七牛 API；快捷创建的空间固定为私有，附件经签名下载链接访问。建议用户在七牛为 CalendarMark 创建专用子账号授权，把泄露影响限制在单个空间。
+- 七牛 AccessKey/SecretKey 是账号级凭据。数据源下线后配置仍留在本机，但应用不会主动请求七牛；建议泄露过的密钥立即轮换，并在恢复该数据源前为 CalendarMark 创建专用子账号授权。
 - 当前没有自动冲突解决、后台队列或离线重试；远程直连模式下双端同时编辑以最后一次写入为准，本地模式下以用户最后一次显式拉取/推送为准。
 
 ## 7. 跨平台策略

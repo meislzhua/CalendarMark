@@ -51,6 +51,9 @@ export function loadSettings(): AppSettings {
     }
   }
   delete (settings as { qiniuToken?: string }).qiniuToken
+  // 七牛源因 CDN 缓存/回源计费模型暂时下线。旧配置仍保留，当前数据源回落到本地，
+  // 避免升级后应用继续直接读写七牛或停留在不可用状态。
+  if (settings.dataSource === 'qiniu') settings.dataSource = 'local'
   return settings
 }
 

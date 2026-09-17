@@ -1,5 +1,5 @@
 import type { AppSettings, CalendarEntry, EntryRemoteRef, NotionDataset, Tag } from './types'
-import { oneEntryPerDate } from './types'
+import { oneEntryPerDate, QINIU_SOURCE_ENABLED } from './types'
 import {
   mergeNotionRecords,
   mergeQiniuDayDocuments,
@@ -529,7 +529,7 @@ export function createRemoteSyncTargets(
     || settings.qiniuSecretKey.trim()
     || settings.qiniuBucket.trim(),
   )
-  return hasQiniuDraft
+  return QINIU_SOURCE_ENABLED && hasQiniuDraft
     ? [...notionTargets, createQiniuSyncTarget(settings, options?.configureQiniu)]
     : notionTargets
 }

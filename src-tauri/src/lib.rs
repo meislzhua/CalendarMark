@@ -6,6 +6,9 @@ use tauri::{
 };
 
 mod notion;
+// 七牛适配器暂时下线：实现保留在测试编译单元中，运行时不再暴露 IPC 命令。
+#[cfg(test)]
+#[allow(dead_code)]
 mod qiniu;
 
 #[derive(serde::Serialize)]
@@ -55,21 +58,6 @@ pub fn run() {
             notion::notion_archive_page,
             notion::notion_search_pages,
             notion::notion_create_database,
-            qiniu::qiniu_list_buckets,
-            qiniu::qiniu_regions,
-            qiniu::qiniu_create_bucket,
-            qiniu::qiniu_bucket_domains,
-            qiniu::qiniu_query_region,
-            qiniu::qiniu_get_usage,
-            qiniu::qiniu_list_keys,
-            qiniu::qiniu_get_object,
-            qiniu::qiniu_get_objects,
-            qiniu::qiniu_get_attachment_data_url,
-            qiniu::qiniu_sign_download_urls,
-            qiniu::qiniu_put_object,
-            qiniu::qiniu_put_objects,
-            qiniu::qiniu_delete_object,
-            qiniu::qiniu_delete_objects,
             get_window_work_area
         ])
         .setup(|_app| {

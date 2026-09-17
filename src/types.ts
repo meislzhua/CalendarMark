@@ -100,6 +100,9 @@ export type QiniuRegionOption = {
   label: string
 }
 
+// 七牛源暂时下线：保留适配器与旧配置，只有重新解决 CDN 缓存/回源计费问题后才启用。
+export const QINIU_SOURCE_ENABLED = false
+
 export const DATA_SOURCE_DEFINITIONS: DataSourceDefinition[] = [
   {
     id: 'notion',
@@ -119,8 +122,8 @@ export const DATA_SOURCE_DEFINITIONS: DataSourceDefinition[] = [
     id: 'qiniu',
     label: '七牛 Kodo',
     description: '私有对象存储空间，跨设备同步',
-    detail: '已接入 · Token 直连',
-    status: 'active',
+    detail: QINIU_SOURCE_ENABLED ? '已接入 · AK/SK 直连' : '暂时下线 · 免费额度不适合实时读写',
+    status: QINIU_SOURCE_ENABLED ? 'active' : 'planned',
   },
   {
     id: 'webdav',
