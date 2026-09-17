@@ -11,23 +11,28 @@ export type QiniuUsage = {
   updatedAt: number
 }
 
+export type QiniuDayRecord = {
+  id: string
+  title: string
+  content: string
+  tagNames: string[]
+  mood?: string
+  updatedAt: string
+  attachments: Array<{
+    id: string
+    name: string
+    key: string
+    mimeType: string
+    size: number
+  }>
+}
+
 export type QiniuDayDocument = {
   date: string
-  entries: Array<{
-    id: string
-    title: string
-    content: string
-    tagNames: string[]
-    mood?: string
-    updatedAt: string
-    attachments: Array<{
-      id: string
-      name: string
-      key: string
-      mimeType: string
-      size: number
-    }>
-  }>
+  /** 当前格式：一天一条记录 */
+  entry?: QiniuDayRecord | null
+  /** 旧格式兼容读取；新写入不会再产生多条 */
+  entries?: QiniuDayRecord[]
 }
 
 export type QiniuTagIndex = {

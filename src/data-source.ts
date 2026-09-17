@@ -1,5 +1,5 @@
 import type { AppSettings, CalendarEntry, EntryRemoteRef, Tag } from './types'
-import { createId, toDateKey, TAG_COLORS } from './types'
+import { createId, oneEntryPerDate, toDateKey, TAG_COLORS } from './types'
 import {
   archiveNotionPage,
   pullNotionEntries,
@@ -15,7 +15,7 @@ import {
   putQiniuObjects,
   signQiniuDownloadUrls,
 } from './qiniu'
-import type { QiniuDayDocument, QiniuTagIndex } from './qiniu'
+import type { QiniuDayDocument, QiniuDayRecord, QiniuTagIndex } from './qiniu'
 
 export type MonthLoadResult = {
   entries: CalendarEntry[]
@@ -287,6 +287,22 @@ export function qiniuTagIndexKey(prefix: string, tagName: string, date: string):
 
 export const QINIU_TAGS_META_KEY = 'meta/tags.json'
 
+export function qiniuDayRecords(document: QiniuDayDocument | null | undefined): QiniuDayRecord[] {
+  if (!document) return []
+  if (document.entry) return [document.entry]
+  return Array.isArray(document.entries) ? document.entries : []
+}
+
+export function latestQiniuDayRecord(document: QiniuDayDocument | null | undefined): QiniuDayRecord | undefined {
+  return qiniuDayRecords(document)
+    .slice()
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.updatedAt)
+      const rightTime = Date.parse(right.updatedAt)
+      return (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime)
+    })[0]
+}
+
 export function parseDataUrl(dataUrl: string): { mimeType: string; base64: string } {
   const match = /^data:([^;,]*);base64,(.*)$/s.exec(dataUrl)
   if (!match) return { mimeType: 'application/octet-stream', base64: dataUrl }
@@ -302,9 +318,10 @@ export function utf8ToBase64(text: string): string {
 
 export function toQiniuDayDocument(date: string, dayEntries: CalendarEntry[], tags: Tag[], prefix: string): QiniuDayDocument {
   const nameById = new Map(tags.map((tag) => [tag.id, tag.name]))
+  const entry = oneEntryPerDate(dayEntries)[0]
   return {
     date,
-    entries: dayEntries.map((entry) => ({
+    entry: entry ? {
       id: entry.id,
       title: entry.title,
       content: entry.content,
@@ -322,7 +339,7 @@ export function toQiniuDayDocument(date: string, dayEntries: CalendarEntry[], ta
         mimeType: attachment.mimeType,
         size: attachment.size,
       })),
-    })),
+    } : null,
   }
 }
 
@@ -349,27 +366,27 @@ export function mergeQiniuDayDocuments(
 
   const entries: CalendarEntry[] = []
   for (const document of documents) {
-    for (const record of document.entries) {
-      entries.push({
-        id: record.id || createId('entry'),
-        date: document.date,
-        title: record.title,
-        content: record.content,
-        tagIds: record.tagNames.map(ensureTag).filter(Boolean),
-        mood: record.mood,
-        attachments: record.attachments.map((attachment) => ({
-          id: attachment.id,
-          name: attachment.name,
-          mimeType: attachment.mimeType,
-          size: attachment.size,
-          dataUrl: '',
-          qiniuKey: attachment.key,
-        })),
-        updatedAt: record.updatedAt || new Date().toISOString(),
-      })
-    }
+    const record = latestQiniuDayRecord(document)
+    if (!record) continue
+    entries.push({
+      id: record.id || createId('entry'),
+      date: document.date,
+      title: record.title,
+      content: record.content,
+      tagIds: record.tagNames.map(ensureTag).filter(Boolean),
+      mood: record.mood,
+      attachments: record.attachments.map((attachment) => ({
+        id: attachment.id,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+        dataUrl: '',
+        qiniuKey: attachment.key,
+      })),
+      updatedAt: record.updatedAt || new Date().toISOString(),
+    })
   }
-  return { entries, newTags: nextTags }
+  return { entries: oneEntryPerDate(entries), newTags: nextTags }
 }
 
 export async function readQiniuObjects(target: QiniuTarget, keys: string[]): Promise<Array<string | null>> {
@@ -507,7 +524,7 @@ export function createQiniuDataSource(
         if (!text) return
         try {
           const parsed = JSON.parse(text) as QiniuDayDocument
-          if (parsed && Array.isArray(parsed.entries) && parsed.entries.length > 0) dayDocuments.push(parsed)
+          if (parsed && qiniuDayRecords(parsed).length > 0) dayDocuments.push(parsed)
         } catch {
           // 跳过损坏的日期文档，不让单个坏文件阻塞整月加载
         }
@@ -557,7 +574,7 @@ export function createQiniuDataSource(
       const currentTarget = target()
       const existing = await readQiniuDayDocument(currentTarget, entry.date)
       const previousTagNames = existing
-        ? Array.from(new Set(existing.entries.flatMap((record) => record.tagNames)))
+        ? Array.from(new Set(qiniuDayRecords(existing).flatMap((record) => record.tagNames)))
         : []
 
       // 上传尚未入库的附件（有 dataUrl 且还没有远端 key）
@@ -596,12 +613,9 @@ export function createQiniuDataSource(
         }),
       }
 
-      // 以远端日期文档为基底，只覆盖当前保存的这条记录。
-      // 不能把前端内存里的“当前月列表”当成全天 authoritative 数据：
-      // 月份加载失败/部分加载时直接覆盖整个日期，会把远端已有记录冲掉。
-      const remoteDayEntries = mergeQiniuDayDocuments(existing ? [existing] : [], tags).entries
-        .filter((item) => item.id !== savedEntry.id)
-      const dayEntries = [...remoteDayEntries, savedEntry]
+      // CalendarMark 语义是“一天一条记录”。保存时按日期直接覆盖，
+      // 不再按 entry id 把远端旧记录和本地记录拼成多条。
+      const dayEntries = [savedEntry]
       const document = toQiniuDayDocument(entry.date, dayEntries, tags, currentTarget.prefix)
       await writeQiniuJson(currentTarget, qiniuDayKey(currentTarget.prefix, entry.date), document)
       const nameById = new Map(tags.map((tag) => [tag.id, tag.name]))
@@ -645,32 +659,23 @@ export function createQiniuDataSource(
       const currentTarget = target()
       const existing = await readQiniuDayDocument(currentTarget, entry.date)
       if (!existing) return
-      const remaining = existing.entries.filter((record) => record.id !== entry.id)
-      const previousTagNames = Array.from(new Set(existing.entries.flatMap((record) => record.tagNames)))
+      const records = qiniuDayRecords(existing)
+      const previousTagNames = Array.from(new Set(records.flatMap((record) => record.tagNames)))
 
-      // 删除该记录独享的附件对象
-      const removed = existing.entries.find((record) => record.id === entry.id)
-      const keptKeys = new Set(remaining.flatMap((record) => record.attachments.map((a) => a.key)))
-      if (removed) {
-        for (const attachment of removed.attachments) {
-          if (!keptKeys.has(attachment.key)) {
-            await deleteQiniuObject(currentTarget.accessKey, currentTarget.secretKey, currentTarget.bucket, currentTarget.region, attachment.key)
-          }
-        }
+      // 一天一条记录；删除日期即删除这一天所有旧格式残留和附件引用。
+      const removedKeys = new Set(records.flatMap((record) => record.attachments.map((attachment) => attachment.key)))
+      for (const key of removedKeys) {
+        await deleteQiniuObject(currentTarget.accessKey, currentTarget.secretKey, currentTarget.bucket, currentTarget.region, key)
       }
+      await deleteQiniuObject(
+        currentTarget.accessKey,
+        currentTarget.secretKey,
+        currentTarget.bucket,
+        currentTarget.region,
+        qiniuDayKey(currentTarget.prefix, entry.date),
+      )
 
-      if (remaining.length === 0) {
-        await deleteQiniuObject(currentTarget.accessKey, currentTarget.secretKey, currentTarget.bucket, currentTarget.region, qiniuDayKey(currentTarget.prefix, entry.date))
-      } else {
-        await writeQiniuJson(currentTarget, qiniuDayKey(currentTarget.prefix, entry.date), { date: entry.date, entries: remaining })
-      }
-
-      // 重建标签索引：没有引用的标签索引对象会被删除
-      await syncQiniuTagIndexes(currentTarget, entry.date, previousTagNames, remaining.map((record) => ({
-        id: record.id,
-        title: record.title,
-        tagNames: record.tagNames,
-      })))
+      await syncQiniuTagIndexes(currentTarget, entry.date, previousTagNames, [])
     },
   }
 }

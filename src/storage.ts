@@ -2,6 +2,7 @@ import {
   DEFAULT_SETTINGS,
   DEFAULT_TAGS,
   getSeedEntries,
+  oneEntryPerDate,
 } from './types'
 import type { AppSettings, CalendarEntry, Tag } from './types'
 
@@ -29,7 +30,7 @@ function write<T>(key: string, value: T): void {
 }
 
 export function loadEntries(): CalendarEntry[] {
-  return read(STORAGE_KEYS.entries, getSeedEntries())
+  return oneEntryPerDate(read(STORAGE_KEYS.entries, getSeedEntries()))
 }
 
 export function loadTags(): Tag[] {
@@ -54,7 +55,7 @@ export function loadSettings(): AppSettings {
 }
 
 export function saveEntries(entries: CalendarEntry[]): void {
-  write(STORAGE_KEYS.entries, entries)
+  write(STORAGE_KEYS.entries, oneEntryPerDate(entries))
 }
 
 export function saveTags(tags: Tag[]): void {

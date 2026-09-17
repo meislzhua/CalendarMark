@@ -1,16 +1,19 @@
 import type { AppSettings, CalendarEntry, EntryRemoteRef, NotionDataset, Tag } from './types'
+import { oneEntryPerDate } from './types'
 import {
   mergeNotionRecords,
   mergeQiniuDayDocuments,
   parseDataUrl,
   QINIU_TAGS_META_KEY,
   qiniuDayKey,
+  qiniuDayRecords,
   qiniuFileKey,
   qiniuTagIndexKey,
   readQiniuObjects,
   toNotionEntryInput,
   toQiniuDayDocument,
   utf8ToBase64,
+  latestQiniuDayRecord,
   type QiniuTarget,
 } from './data-source'
 import { pullNotionEntries, pushNotionEntries } from './notion'
@@ -194,7 +197,7 @@ function mergeQiniuEntriesWithLocal(remoteEntries: CalendarEntry[], currentEntri
     if (existingIndex >= 0) merged[existingIndex] = next
     else merged.push(next)
   }
-  return merged
+  return oneEntryPerDate(merged)
 }
 
 async function readQiniuObjectsChunked(target: QiniuTarget, keys: string[]): Promise<Array<string | null>> {
@@ -216,7 +219,7 @@ async function listQiniuDayDocuments(target: QiniuTarget, warnings: string[]): P
     if (!text) return
     try {
       const parsed = JSON.parse(text) as QiniuDayDocument
-      if (parsed && Array.isArray(parsed.entries)) documents.push(parsed)
+      if (parsed && qiniuDayRecords(parsed).length > 0) documents.push(parsed)
     } catch {
       warnings.push(`七牛日期对象 ${dateKeys[index]} 已损坏，已跳过。`)
     }
@@ -397,7 +400,7 @@ function createQiniuSyncTarget(settings: AppSettings, configure?: () => void): R
     async pushFromLocal(entries, tags) {
       const warnings: string[] = []
       const nameById = new Map(tags.map((tag) => [tag.id, tag.name]))
-      const updatedEntries = entries.map((entry) => ({ ...entry, attachments: [...entry.attachments] }))
+      const updatedEntries = oneEntryPerDate(entries).map((entry) => ({ ...entry, attachments: [...entry.attachments] }))
       const dates = Array.from(new Set(entries.map((entry) => entry.date))).sort()
       const dateSet = new Set(dates)
       const dayKeys = dates.map((date) => qiniuDayKey(target.prefix, date))
@@ -426,7 +429,7 @@ function createQiniuSyncTarget(settings: AppSettings, configure?: () => void): R
 
       const attachmentUploads: QiniuObjectInput[] = []
       for (const entry of updatedEntries) {
-        const existingRecord = existingByDate.get(entry.date)?.entries.find((record) => record.id === entry.id)
+        const existingRecord = latestQiniuDayRecord(existingByDate.get(entry.date))
         entry.attachments = entry.attachments.map((attachment) => {
           const existingAttachment = existingRecord?.attachments.find((item) => item.id === attachment.id)
             ?? existingRecord?.attachments.find((item) => item.name === attachment.name && item.mimeType === attachment.mimeType)
@@ -452,14 +455,7 @@ function createQiniuSyncTarget(settings: AppSettings, configure?: () => void): R
       const jsonWrites: QiniuObjectInput[] = []
       const expectedTagIndexKeys = new Set<string>()
       for (const date of dates) {
-        const existing = existingByDate.get(date)
-        const remoteOnly = mergeQiniuDayDocuments(existing ? [existing] : [], tags).entries
-          .filter((item) => !updatedEntries.some((entry) => entry.id === item.id))
-        const dayEntriesById = new Map(remoteOnly.map((entry) => [entry.id, entry]))
-        for (const entry of updatedEntries.filter((item) => item.date === date)) {
-          dayEntriesById.set(entry.id, entry)
-        }
-        const dayEntries = Array.from(dayEntriesById.values())
+        const dayEntries = updatedEntries.filter((item) => item.date === date)
         if (dayEntries.length === 0) continue
 
         const dayKey = qiniuDayKey(target.prefix, date)
@@ -507,7 +503,7 @@ function createQiniuSyncTarget(settings: AppSettings, configure?: () => void): R
           ...entry,
           remote: entries[index].remote ?? entry.remoteRefs?.qiniu,
         })),
-        pushedCount: entries.length,
+        pushedCount: updatedEntries.length,
         warnings,
       }
     },

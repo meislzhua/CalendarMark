@@ -46,6 +46,29 @@ export type CalendarEntry = {
   remoteRefs?: Partial<Record<'notion' | 'qiniu', EntryRemoteRef>>
 }
 
+/**
+ * CalendarMark 的日历语义是“一天一条记录”。旧版本本地/七牛数据可能因为
+ * 远端 ID 与本地 ID 不一致而产生同日多条记录；读取和写入时统一收敛为最新一条。
+ */
+export function oneEntryPerDate(entries: CalendarEntry[]): CalendarEntry[] {
+  const byDate = new Map<string, CalendarEntry>()
+  for (const entry of entries) {
+    const current = byDate.get(entry.date)
+    const currentTime = Date.parse(entry.updatedAt)
+    const currentTimeValue = Number.isNaN(currentTime) ? 0 : currentTime
+    if (!current) {
+      byDate.set(entry.date, entry)
+      continue
+    }
+    const currentTimeExisting = Date.parse(current.updatedAt)
+    const existingValue = Number.isNaN(currentTimeExisting) ? 0 : currentTimeExisting
+    if (currentTimeValue > existingValue || (currentTimeValue === existingValue && entry.updatedAt > current.updatedAt)) {
+      byDate.set(entry.date, entry)
+    }
+  }
+  return Array.from(byDate.values()).sort((left, right) => left.date.localeCompare(right.date))
+}
+
 export const MOOD_OPTIONS = ['😊', '😐', '😢', '😴', '😑', '😤', '🤩'] as const
 
 export type ThemeMode = 'light' | 'dark' | 'auto'

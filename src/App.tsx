@@ -45,6 +45,7 @@ import {
   createId,
   formatDateKey,
   fromDateKey,
+  oneEntryPerDate,
   toDateKey,
 } from './types'
 import type {
@@ -437,10 +438,10 @@ function App() {
             const known = new Set(previous.map((tag) => tag.name.toLowerCase()))
             return [...previous, ...result.newTags.filter((tag) => !known.has(tag.name.toLowerCase()))]
           })
-          setEntries((previous) => [
+          setEntries((previous) => oneEntryPerDate([
             ...previous.filter((entry) => entry.date.slice(0, 7) !== monthKey),
             ...result.entries,
-          ])
+          ]))
           setRemoteDataState('ready')
         })
         .catch((error) => {
@@ -655,13 +656,10 @@ function App() {
         const savedEntry = await dataSource.saveEntry(cleaned, tags)
         const monthKey = savedEntry.date.slice(0, 7)
         loadedMonthsRef.current.add(monthKey)
-        setEntries((previous) => {
-          const index = previous.findIndex((entry) => entry.id === savedEntry.id)
-          if (index === -1) return [...previous, savedEntry]
-          const next = [...previous]
-          next[index] = savedEntry
-          return next
-        })
+        setEntries((previous) => oneEntryPerDate([
+          ...previous.filter((entry) => entry.date !== savedEntry.date),
+          savedEntry,
+        ]))
         setRemoteDataState('ready')
         setNotice(settings.dataSource === 'qiniu' ? '已直接保存到七牛 Kodo' : '已直接保存到 Notion')
       } catch (error) {
@@ -672,13 +670,10 @@ function App() {
     }
 
     const savedEntry = await dataSource.saveEntry(cleaned, tags)
-    setEntries((previous) => {
-      const index = previous.findIndex((entry) => entry.id === cleaned.id)
-      if (index === -1) return [...previous, savedEntry]
-      const next = [...previous]
-      next[index] = savedEntry
-      return next
-    })
+    setEntries((previous) => oneEntryPerDate([
+      ...previous.filter((entry) => entry.date !== savedEntry.date),
+      savedEntry,
+    ]))
     setNotice('日期内容已保存')
   }
 
@@ -702,7 +697,7 @@ function App() {
       }
       setRemoteDataState('ready')
     }
-    setEntries((previous) => previous.filter((entry) => entry.id !== draft.id))
+    setEntries((previous) => previous.filter((entry) => entry.date !== draft.date))
     setConfirmingDelete(false)
     setNotice('日期内容已删除')
   }
