@@ -80,8 +80,6 @@ import {
   checkNotionConnection,
   createNotionDatabase,
   discoverNotionDatasets,
-  pullNotionEntries,
-  pushNotionEntries,
   searchNotionPages,
 } from './notion'
 import {
@@ -93,10 +91,12 @@ import type { CalendarDataSource } from './data-source'
 import type {
   NotionConnectionInfo,
   NotionDatasetOption,
-  NotionEntryRecord,
   NotionPageOption,
-  NotionPushResult,
 } from './notion'
+import {
+  createRemoteSyncTargets,
+} from './remote-sync'
+import type { RemoteSyncDirection, RemoteSyncTarget } from './remote-sync'
 import {
   createQiniuBucket,
   getQiniuUsage,
@@ -317,26 +317,6 @@ function withNotionDataset(settings: AppSettings, dataset: NotionDataset): AppSe
       : [...datasets, dataset],
     notionDatabaseId: dataset.databaseId,
     notionDataSourceId: dataset.dataSourceId,
-  }
-}
-
-function toNotionEntryInput(entry: CalendarEntry, tags: Tag[], dataSourceId?: string) {
-  const tagNames = new Map(tags.map((tag) => [tag.id, tag.name]))
-  const remoteId = entry.remote?.provider === 'notion'
-    && (!dataSourceId || entry.remote.dataSourceId === dataSourceId)
-    ? entry.remote.id
-    : undefined
-  return {
-    localId: entry.id,
-    remoteId,
-    date: entry.date,
-    title: entry.title,
-    content: entry.content,
-    tagNames: entry.tagIds
-      .map((tagId) => tagNames.get(tagId))
-      .filter((name): name is string => Boolean(name)),
-    mood: entry.mood,
-    attachments: entry.attachments,
   }
 }
 
@@ -1683,86 +1663,6 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
   </>
 }
 
-function mergeNotionEntries(records: NotionEntryRecord[], currentEntries: CalendarEntry[], currentTags: Tag[]): { entries: CalendarEntry[]; tags: Tag[] } {
-  const nextEntries = [...currentEntries]
-  const nextTags = [...currentTags]
-  const tagByName = new Map(nextTags.map((tag) => [tag.name.toLowerCase(), tag]))
-  const syncedAt = new Date().toISOString()
-
-  for (const record of records) {
-    const tagIds = record.tagNames.map((name) => {
-      const cleanName = name.trim()
-      if (!cleanName) return undefined
-      const key = cleanName.toLowerCase()
-      const existing = tagByName.get(key)
-      if (existing) return existing.id
-      const tag: Tag = { id: createId('tag'), name: cleanName, color: TAG_COLORS[nextTags.length % TAG_COLORS.length] }
-      nextTags.push(tag)
-      tagByName.set(key, tag)
-      return tag.id
-    }).filter((tagId): tagId is string => Boolean(tagId))
-    const attachments = record.attachments.map((attachment, index) => ({
-      id: attachment.remoteId ?? `notion-${record.remoteId}-${index}`,
-      name: attachment.name,
-      mimeType: attachment.mimeType,
-      size: attachment.size,
-      dataUrl: '',
-      sourceUrl: attachment.sourceUrl,
-      remoteId: attachment.remoteId,
-      remoteFile: attachment.remoteFile,
-    }))
-    const existingIndex = nextEntries.findIndex((entry) => entry.remote?.provider === 'notion' && entry.remote.id === record.remoteId)
-    const previous = existingIndex >= 0 ? nextEntries[existingIndex] : undefined
-    const merged: CalendarEntry = {
-      id: previous?.id ?? createId('entry'),
-      date: record.date,
-      title: record.title,
-      content: record.content,
-      tagIds,
-      mood: record.mood,
-      attachments,
-      updatedAt: record.updatedAt || syncedAt,
-      remote: { provider: 'notion', id: record.remoteId, dataSourceId: record.dataSourceId, lastSyncedAt: syncedAt },
-    }
-    if (existingIndex >= 0) nextEntries[existingIndex] = merged
-    else nextEntries.push(merged)
-  }
-
-  return { entries: nextEntries, tags: nextTags }
-}
-
-function applyPushResult(result: NotionPushResult, onChangeEntries: (entries: CalendarEntry[]) => void, currentEntries: CalendarEntry[]) {
-  onChangeEntries(currentEntries.map((entry) => applyPushResultToEntry(entry, result)))
-}
-
-function applyPushResultToEntry(entry: CalendarEntry, result: NotionPushResult): CalendarEntry {
-  const pushed = result.entries.find((item) => item.localId === entry.id)
-  if (!pushed) return entry
-  // 合并 Notion 返回的附件稳定引用（file upload ID / external 链接），
-  // 后续再次编辑保存时复用引用，而不是把同一文件重新上传一遍。
-  const attachments = entry.attachments.map((attachment, index) => {
-    const reference = pushed.attachments?.[index]
-    if (!reference || reference.name !== attachment.name) return attachment
-    return {
-      ...attachment,
-      sourceUrl: reference.sourceUrl ?? attachment.sourceUrl,
-      remoteId: reference.remoteId ?? attachment.remoteId,
-      remoteFile: reference.remoteFile ?? attachment.remoteFile,
-    }
-  })
-  return {
-    ...entry,
-    attachments,
-    updatedAt: pushed.updatedAt || entry.updatedAt,
-    remote: {
-      provider: 'notion',
-      id: pushed.remoteId,
-      dataSourceId: pushed.dataSourceId,
-      lastSyncedAt: new Date().toISOString(),
-    },
-  }
-}
-
 function formatSyncNotice(message: string, warnings: string[]): string {
   if (!warnings.length) return message
   return `${message}；${warnings.slice(0, 2).join('；')}${warnings.length > 2 ? `（另有 ${warnings.length - 2} 条警告）` : ''}`
@@ -1781,53 +1681,48 @@ type LocalSourceSettingsProps = {
 }
 
 function LocalSourceSettings({ settings, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onNotice, onSelectNotion, onSelectQiniu }: LocalSourceSettingsProps) {
-  const [busy, setBusy] = useState<'idle' | 'pulling' | 'pushing'>('idle')
-  const savedDatasets = settings.notionDatasets ?? []
-  const selectedDataset = getActiveNotionDataset(settings)
-  const qiniuPrefix = settings.qiniuPrefix.trim() || 'calendarmark'
-  const isQiniuConfigured = Boolean(settings.qiniuAccessKey.trim() && settings.qiniuSecretKey.trim() && settings.qiniuBucket.trim())
-  const remoteCount = savedDatasets.length + (isQiniuConfigured ? 1 : 0)
+  const [busySync, setBusySync] = useState<{ targetId: string; direction: RemoteSyncDirection } | null>(null)
+  const remoteTargets = createRemoteSyncTargets(settings, {
+    activateNotionDataset: (dataset) => onChangeSettings((previous) => ({
+      ...previous,
+      notionDatabaseId: dataset.databaseId,
+      notionDataSourceId: dataset.dataSourceId,
+    })),
+    configureNotion: onSelectNotion,
+    configureQiniu: onSelectQiniu,
+  })
+  const configuredCount = remoteTargets.filter((target) => target.configured).length
 
-  async function handlePull() {
-    const dataset = getActiveNotionDataset(settings)
-    if (!settings.notionToken.trim() || !dataset?.databaseId) {
-      onNotice('请先在 Notion 数据源中完成连接并添加数据集')
-      return
-    }
-    setBusy('pulling')
-    try {
-      const result = await pullNotionEntries(settings.notionToken, dataset.databaseId, dataset.dataSourceId)
-      const merged = mergeNotionEntries(result.entries, entries, tags)
-      onChangeTags(merged.tags)
-      onChangeEntries(merged.entries)
-      onNotice(formatSyncNotice(`已从 Notion 拉取 ${result.entries.length} 条记录到本地`, result.warnings))
-    } catch (error) {
-      onNotice(error instanceof Error ? error.message : String(error))
-    } finally {
-      setBusy('idle')
-    }
+  function isBusy(target: RemoteSyncTarget, direction: RemoteSyncDirection): boolean {
+    return busySync?.targetId === target.id && busySync.direction === direction
   }
 
-  async function handlePush() {
-    const dataset = getActiveNotionDataset(settings)
-    if (!settings.notionToken.trim() || !dataset?.databaseId) {
-      onNotice('请先在 Notion 数据源中完成连接并添加数据集')
+  function anyBusy(): boolean {
+    return busySync !== null
+  }
+
+  async function handleRemoteSync(target: RemoteSyncTarget, direction: RemoteSyncDirection) {
+    if (!target.configured) {
+      onNotice(`请先完成 ${target.label} 的配置：${target.requirement}`)
+      target.configure?.()
       return
     }
-    setBusy('pushing')
+    setBusySync({ targetId: target.id, direction })
     try {
-      const result = await pushNotionEntries(
-        settings.notionToken,
-        dataset.databaseId,
-        dataset.dataSourceId,
-        entries.map((entry) => toNotionEntryInput(entry, tags, dataset.dataSourceId)),
-      )
-      applyPushResult(result, onChangeEntries, entries)
-      onNotice(formatSyncNotice(`已推送 ${result.entries.length} 条本地记录到 Notion`, result.warnings))
+      if (direction === 'pull') {
+        const result = await target.pullToLocal(entries, tags)
+        onChangeTags(result.tags)
+        onChangeEntries(result.entries)
+        onNotice(formatSyncNotice(`已从 ${target.label} 拉取 ${result.pulledCount} 条记录到本地`, result.warnings))
+      } else {
+        const result = await target.pushFromLocal(entries, tags)
+        onChangeEntries(result.entries)
+        onNotice(formatSyncNotice(`已推送 ${result.pushedCount} 条本地记录到 ${target.label}`, result.warnings))
+      }
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error))
     } finally {
-      setBusy('idle')
+      setBusySync(null)
     }
   }
 
@@ -1839,41 +1734,41 @@ function LocalSourceSettings({ settings, onChangeSettings, entries, onChangeEntr
         <div className="local-source-body"><p>当前日历使用本机数据，保存会立即写入本地。已绑定的远程数据集可以按需拉取到本地，或将本地记录推送到远程。</p><div className="local-source-points"><span><Check size={14} />离线可用</span><span><Check size={14} />本地优先</span><span><Check size={14} />按需同步</span></div></div>
       </div>
       <div className="source-card source-card--remote-sync">
-        <div className="source-card-top"><div className="source-placeholder-icon"><Cloud size={18} /></div><div><strong>已绑定的远程数据源</strong><span>Notion 数据集和七牛 Kodo 空间都会显示在这里</span></div><span className="connection-badge"><span className={`status-dot ${remoteCount ? 'status-dot--ready' : 'status-dot--muted'}`} />{remoteCount ? `${remoteCount} 个已绑定` : '未绑定'}</span></div>
+        <div className="source-card-top"><div className="source-placeholder-icon"><Cloud size={18} /></div><div><strong>已绑定的远程数据源</strong><span>每个远程目标都支持拉取到本地和推送本地记录</span></div><span className="connection-badge"><span className={`status-dot ${configuredCount ? 'status-dot--ready' : 'status-dot--muted'}`} />{configuredCount ? `${configuredCount} 个可用` : '未绑定'}</span></div>
         <div className="source-divider" />
-        {savedDatasets.length > 0
-          ? <>
-            <div className="notion-dataset-list notion-dataset-list--compact">
-              {savedDatasets.map((dataset) => {
-                const active = selectedDataset && notionDatasetKey(dataset) === notionDatasetKey(selectedDataset)
-                return <div className={'notion-dataset-option' + (active ? ' notion-dataset-option--active' : '')} key={notionDatasetKey(dataset)}>
-                  <button type="button" className="notion-dataset-select" onClick={() => onChangeSettings((previous) => ({
-                    ...previous,
-                    notionDatabaseId: dataset.databaseId,
-                    notionDataSourceId: dataset.dataSourceId,
-                  }))}>
-                    <span className="notion-dataset-copy"><strong>{dataset.databaseTitle}</strong><small>{dataset.dataSourceName}</small></span>
-                    {active && <span className="notion-dataset-current">同步目标</span>}
+        {remoteTargets.length > 0
+          ? <div className="remote-sync-target-list">
+            {remoteTargets.map((target) => (
+              <div className={'remote-sync-target' + (target.active ? ' remote-sync-target--active' : '')} key={target.id}>
+                <button
+                  type="button"
+                  className="remote-sync-target-select"
+                  onClick={target.activate}
+                  disabled={!target.activate}
+                  aria-current={target.active ? 'true' : undefined}
+                >
+                  <span className="remote-sync-provider">{target.provider === 'notion' ? 'N' : 'Q'}</span>
+                  <span className="remote-sync-copy">
+                    <strong>{target.label}</strong>
+                    <small>{target.detail}</small>
+                  </span>
+                  {target.active && <span className="remote-sync-current">当前</span>}
+                </button>
+                <div className="remote-sync-actions">
+                  <button type="button" className="secondary-button" disabled={anyBusy()} onClick={() => { void handleRemoteSync(target, 'pull') }}>
+                    <ArrowLeft size={15} className={isBusy(target, 'pull') ? 'spin' : ''} />
+                    {isBusy(target, 'pull') ? '正在拉取…' : '拉取到本地'}
+                  </button>
+                  <button type="button" className="primary-button" disabled={anyBusy()} onClick={() => { void handleRemoteSync(target, 'push') }}>
+                    <Cloud size={15} className={isBusy(target, 'push') ? 'spin' : ''} />
+                    {isBusy(target, 'push') ? '正在推送…' : '推送到远程'}
                   </button>
                 </div>
-              })}
-            </div>
-            {settings.notionToken.trim()
-              ? <div className="source-card-footer source-card-footer--notion"><span><RefreshCw size={15} className={busy !== 'idle' ? 'spin' : ''} />{busy === 'pulling' ? '正在从 Notion 拉取…' : busy === 'pushing' ? '正在推送本地记录…' : '本地 ↔ 已选数据集'}</span><div className="notion-actions"><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handlePull() }}><ArrowLeft size={15} />拉取到本地</button><button type="button" className="primary-button" disabled={busy !== 'idle'} onClick={() => { void handlePush() }}><Cloud size={15} />推送到 Notion</button></div></div>
-              : <div className="local-sync-empty"><span>数据集需要配合 Integration Token 使用。</span><button type="button" className="secondary-button" onClick={onSelectNotion}>去 Notion 数据源配置 Token</button></div>}
-          </>
-          : null}
-        {isQiniuConfigured && <div className="qiniu-bucket-list qiniu-bucket-list--sync">
-          <div className={'qiniu-bucket-option qiniu-bucket-option--active'}>
-            <div className="qiniu-bucket-copy">
-              <strong>{settings.qiniuBucket}</strong>
-              <small>七牛 Kodo · 区域 {settings.qiniuRegion || 'z0'} · 前缀 /{qiniuPrefix}</small>
-            </div>
-            <span className="qiniu-bucket-current">已绑定</span>
+                {!target.configured && <div className="remote-sync-requirement">{target.requirement}</div>}
+              </div>
+            ))}
           </div>
-          <div className="qiniu-bucket-hint">本地储存暂不支持七牛手动拉取/推送；切换为七牛数据源后，编辑会直接写入该空间。</div>
-        </div>}
-        {savedDatasets.length === 0 && !isQiniuConfigured && <div className="local-sync-empty">
+          : <div className="local-sync-empty">
           <div><strong>还没有绑定远程数据源</strong><span>绑定 Notion 数据集或七牛空间后，这里会显示所有可同步目标。</span></div>
           <div className="local-sync-actions">
             <button type="button" className="secondary-button" onClick={onSelectNotion}><Database size={15} />配置 Notion</button>
@@ -1882,7 +1777,7 @@ function LocalSourceSettings({ settings, onChangeSettings, entries, onChangeEntr
         </div>}
       </div>
     </div>
-    <div className="info-banner"><Sparkles size={16} /><span><strong>本地同步规则：</strong>CalendarMark 当前以本地记录为主；Notion 可手动拉取或推送，七牛显示已绑定空间并支持切换为直连数据源。想让每次编辑直接写远程？切换到 Notion 或七牛数据源即可。</span></div>
+    <div className="info-banner"><Sparkles size={16} /><span><strong>本地同步规则：</strong>CalendarMark 当前以本地记录为主；列表中的每个远程目标都可以拉取到本地，也可以把本地记录推送到该远程。想让每次编辑直接写远程？切换到对应数据源即可。</span></div>
   </>
 }
 

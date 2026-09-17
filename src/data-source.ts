@@ -1,4 +1,4 @@
-import type { AppSettings, CalendarEntry, Tag } from './types'
+import type { AppSettings, CalendarEntry, EntryRemoteRef, Tag } from './types'
 import { createId, toDateKey, TAG_COLORS } from './types'
 import {
   archiveNotionPage,
@@ -43,6 +43,23 @@ export interface CalendarDataSource {
   deleteEntry(entry: CalendarEntry): Promise<void>
 }
 
+export type RemoteProviderId = 'notion' | 'qiniu'
+
+export function getRemoteRef(entry: CalendarEntry, provider: RemoteProviderId): EntryRemoteRef | undefined {
+  return entry.remoteRefs?.[provider] ?? (entry.remote?.provider === provider ? entry.remote : undefined)
+}
+
+export function withRemoteRef(entry: CalendarEntry, ref: EntryRemoteRef): CalendarEntry {
+  return {
+    ...entry,
+    remote: ref,
+    remoteRefs: {
+      ...entry.remoteRefs,
+      [ref.provider]: ref,
+    },
+  }
+}
+
 function monthRange(year: number, month: number): { start: string; end: string } {
   const start = new Date(year, month, 1)
   const end = new Date(year, month + 1, 1)
@@ -51,9 +68,9 @@ function monthRange(year: number, month: number): { start: string; end: string }
 
 export function toNotionEntryInput(entry: CalendarEntry, tags: Tag[], dataSourceId?: string) {
   const tagNames = new Map(tags.map((tag) => [tag.id, tag.name]))
-  const remoteId = entry.remote?.provider === 'notion'
-    && (!dataSourceId || entry.remote.dataSourceId === dataSourceId)
-    ? entry.remote.id
+  const notionRef = getRemoteRef(entry, 'notion')
+  const remoteId = notionRef && (!dataSourceId || notionRef.dataSourceId === dataSourceId)
+    ? notionRef.id
     : undefined
   const input: NotionEntryInput = {
     localId: entry.id,
@@ -92,19 +109,28 @@ export function mergeNotionRecords(
       tagByName.set(key, tag)
       return tag.id
     }).filter((tagId): tagId is string => Boolean(tagId))
-    const attachments = record.attachments.map((attachment, index) => ({
-      id: attachment.remoteId ?? `notion-${record.remoteId}-${index}`,
-      name: attachment.name,
-      mimeType: attachment.mimeType,
-      size: attachment.size,
-      dataUrl: '',
-      sourceUrl: attachment.sourceUrl,
-      remoteId: attachment.remoteId,
-      remoteFile: attachment.remoteFile,
-    }))
-    const existingIndex = nextEntries.findIndex((entry) => entry.remote?.provider === 'notion' && entry.remote.id === record.remoteId)
+    const existingIndex = nextEntries.findIndex((entry) => getRemoteRef(entry, 'notion')?.id === record.remoteId)
     const previous = existingIndex >= 0 ? nextEntries[existingIndex] : undefined
+    const attachments = record.attachments.map((attachment, index) => {
+      const previousAttachment = previous?.attachments.find((item) => (
+        item.remoteId === attachment.remoteId || (item.name === attachment.name && item.mimeType === attachment.mimeType)
+      )) ?? previous?.attachments[index]
+      return {
+        ...previousAttachment,
+        id: attachment.remoteId ?? previousAttachment?.id ?? `notion-${record.remoteId}-${index}`,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+        dataUrl: previousAttachment?.dataUrl ?? '',
+        sourceUrl: attachment.sourceUrl ?? previousAttachment?.sourceUrl,
+        remoteId: attachment.remoteId,
+        remoteFile: attachment.remoteFile,
+        qiniuKey: previousAttachment?.qiniuKey,
+      }
+    })
+    const notionRef: EntryRemoteRef = { provider: 'notion', id: record.remoteId, dataSourceId: record.dataSourceId, lastSyncedAt: syncedAt }
     const merged: CalendarEntry = {
+      ...previous,
       id: previous?.id ?? createId('entry'),
       date: record.date,
       title: record.title,
@@ -113,7 +139,11 @@ export function mergeNotionRecords(
       mood: record.mood,
       attachments,
       updatedAt: record.updatedAt || syncedAt,
-      remote: { provider: 'notion', id: record.remoteId, dataSourceId: record.dataSourceId, lastSyncedAt: syncedAt },
+      remote: previous?.remote ?? notionRef,
+      remoteRefs: {
+        ...previous?.remoteRefs,
+        notion: notionRef,
+      },
     }
     if (existingIndex >= 0) nextEntries[existingIndex] = merged
     else nextEntries.push(merged)
@@ -205,26 +235,26 @@ export function createNotionDataSource(
         }
       })
       return {
-        ...entry,
-        attachments,
-        updatedAt: pushed.updatedAt || entry.updatedAt,
-        remote: {
-          provider: 'notion' as const,
+        ...withRemoteRef(entry, {
+          provider: 'notion',
           id: pushed.remoteId,
           dataSourceId: pushed.dataSourceId,
           lastSyncedAt: new Date().toISOString(),
-        },
+        }),
+        attachments,
+        updatedAt: pushed.updatedAt || entry.updatedAt,
       }
     },
     async deleteEntry(entry) {
-      if (entry.remote?.provider !== 'notion') return
+      const notionRef = getRemoteRef(entry, 'notion')
+      if (!notionRef) return
       const { token } = await target()
-      await archiveNotionPage(token, entry.remote.id)
+      await archiveNotionPage(token, notionRef.id)
     },
   }
 }
 
-type QiniuTarget = {
+export type QiniuTarget = {
   accessKey: string
   secretKey: string
   bucket: string
@@ -256,20 +286,20 @@ export function qiniuTagIndexKey(prefix: string, tagName: string, date: string):
 
 export const QINIU_TAGS_META_KEY = 'meta/tags.json'
 
-function parseDataUrl(dataUrl: string): { mimeType: string; base64: string } {
+export function parseDataUrl(dataUrl: string): { mimeType: string; base64: string } {
   const match = /^data:([^;,]*);base64,(.*)$/s.exec(dataUrl)
   if (!match) return { mimeType: 'application/octet-stream', base64: dataUrl }
   return { mimeType: match[1] || 'application/octet-stream', base64: match[2] }
 }
 
-function utf8ToBase64(text: string): string {
+export function utf8ToBase64(text: string): string {
   const bytes = new TextEncoder().encode(text)
   let binary = ''
   bytes.forEach((byte) => { binary += String.fromCharCode(byte) })
   return btoa(binary)
 }
 
-function toQiniuDayDocument(date: string, dayEntries: CalendarEntry[], tags: Tag[], prefix: string): QiniuDayDocument {
+export function toQiniuDayDocument(date: string, dayEntries: CalendarEntry[], tags: Tag[], prefix: string): QiniuDayDocument {
   const nameById = new Map(tags.map((tag) => [tag.id, tag.name]))
   return {
     date,
@@ -285,7 +315,9 @@ function toQiniuDayDocument(date: string, dayEntries: CalendarEntry[], tags: Tag
       attachments: entry.attachments.map((attachment) => ({
         id: attachment.id,
         name: attachment.name,
-        key: attachment.remoteId ?? qiniuFileKey(prefix, attachment.id, attachment.name),
+        key: attachment.qiniuKey
+          ?? (entry.remote?.provider === 'qiniu' ? attachment.remoteId : undefined)
+          ?? qiniuFileKey(prefix, attachment.id, attachment.name),
         mimeType: attachment.mimeType,
         size: attachment.size,
       })),
@@ -330,7 +362,7 @@ export function mergeQiniuDayDocuments(
           mimeType: attachment.mimeType,
           size: attachment.size,
           dataUrl: '',
-          remoteId: attachment.key,
+          qiniuKey: attachment.key,
         })),
         updatedAt: record.updatedAt || new Date().toISOString(),
       })
@@ -339,12 +371,12 @@ export function mergeQiniuDayDocuments(
   return { entries, newTags: nextTags }
 }
 
-async function readQiniuObjects(target: QiniuTarget, keys: string[]): Promise<Array<string | null>> {
+export async function readQiniuObjects(target: QiniuTarget, keys: string[]): Promise<Array<string | null>> {
   if (keys.length === 0) return []
   return getQiniuObjects(target.accessKey, target.secretKey, target.bucket, target.region, target.domain, keys)
 }
 
-async function readQiniuDayDocument(target: QiniuTarget, date: string): Promise<QiniuDayDocument | null> {
+export async function readQiniuDayDocument(target: QiniuTarget, date: string): Promise<QiniuDayDocument | null> {
   const [text] = await readQiniuObjects(target, [qiniuDayKey(target.prefix, date)])
   if (!text) return null
   try {
@@ -355,12 +387,12 @@ async function readQiniuDayDocument(target: QiniuTarget, date: string): Promise<
   }
 }
 
-async function writeQiniuJson(target: QiniuTarget, key: string, value: unknown): Promise<void> {
+export async function writeQiniuJson(target: QiniuTarget, key: string, value: unknown): Promise<void> {
   const text = JSON.stringify(value, null, 2)
   await putQiniuObject(target.accessKey, target.secretKey, target.bucket, target.region, key, utf8ToBase64(text), 'application/json')
 }
 
-async function syncQiniuTagIndexes(
+export async function syncQiniuTagIndexes(
   target: QiniuTarget,
   date: string,
   previousTagNames: string[],
@@ -413,7 +445,9 @@ export function createQiniuDataSource(
   }
 
   async function hydrateAttachments(loaded: CalendarEntry[]): Promise<CalendarEntry[]> {
-    const attachmentKeys = loaded.flatMap((entry) => entry.attachments.map((a) => a.remoteId).filter((key): key is string => Boolean(key)))
+    const attachmentKeys = loaded.flatMap((entry) => entry.attachments.map((attachment) => (
+      attachment.qiniuKey ?? (entry.remote?.provider === 'qiniu' ? attachment.remoteId : undefined)
+    )).filter((key): key is string => Boolean(key)))
     if (attachmentKeys.length === 0) return loaded
     const sourceUrls = await signQiniuDownloadUrls(target().accessKey, target().secretKey, target().domain, attachmentKeys)
     const sourceUrlByKey = new Map(attachmentKeys.map((key, index) => [key, sourceUrls[index]]))
@@ -421,7 +455,7 @@ export function createQiniuDataSource(
     const hydrated: CalendarEntry[] = []
     for (const entry of loaded) {
       const attachments = await Promise.all(entry.attachments.map(async (attachment) => {
-        const key = attachment.remoteId
+        const key = attachment.qiniuKey ?? (entry.remote?.provider === 'qiniu' ? attachment.remoteId : undefined)
         if (!key) return attachment
         const sourceUrl = sourceUrlByKey.get(key)
         let dataUrl = attachment.dataUrl
@@ -522,7 +556,9 @@ export function createQiniuDataSource(
         : []
 
       // 上传尚未入库的附件（有 dataUrl 且还没有远端 key）
-      const pendingUploads = entry.attachments.filter((attachment) => attachment.dataUrl && !attachment.remoteId)
+      const pendingUploads = entry.attachments.filter((attachment) => attachment.dataUrl && !(
+        attachment.qiniuKey ?? (entry.remote?.provider === 'qiniu' ? attachment.remoteId : undefined)
+      ))
       const uploadedKeys = new Map<string, string>()
       for (const attachment of pendingUploads) {
         const key = qiniuFileKey(currentTarget.prefix, attachment.id, attachment.name)
@@ -541,9 +577,10 @@ export function createQiniuDataSource(
       const savedEntry: CalendarEntry = {
         ...entry,
         attachments: entry.attachments.map((attachment) => {
-          if (attachment.remoteId) return attachment
+          const existingKey = attachment.qiniuKey ?? (entry.remote?.provider === 'qiniu' ? attachment.remoteId : undefined)
+          if (existingKey) return attachment
           const key = uploadedKeys.get(attachment.id)
-          return key ? { ...attachment, remoteId: key, dataUrl: '' } : attachment
+          return key ? { ...attachment, qiniuKey: key } : attachment
         }),
       }
 
@@ -569,23 +606,24 @@ export function createQiniuDataSource(
       })
 
       const sourceUrlByKey = new Map<string, string>()
-      const keysForUrls = savedEntry.attachments.map((a) => a.remoteId).filter((key): key is string => Boolean(key))
+      const keysForUrls = savedEntry.attachments.map((attachment) => (
+        attachment.qiniuKey ?? (entry.remote?.provider === 'qiniu' ? attachment.remoteId : undefined)
+      )).filter((key): key is string => Boolean(key))
       if (keysForUrls.length > 0) {
         const urls = await signQiniuDownloadUrls(currentTarget.accessKey, currentTarget.secretKey, currentTarget.domain, keysForUrls)
         keysForUrls.forEach((key, index) => sourceUrlByKey.set(key, urls[index]))
       }
       return {
-        ...savedEntry,
-        attachments: savedEntry.attachments.map((attachment) => ({
-          ...attachment,
-          sourceUrl: attachment.remoteId ? sourceUrlByKey.get(attachment.remoteId) ?? attachment.sourceUrl : attachment.sourceUrl,
-        })),
-        remote: {
-          provider: 'qiniu' as const,
+        ...withRemoteRef(savedEntry, {
+          provider: 'qiniu',
           id: savedEntry.id,
           dataSourceId: currentTarget.bucket,
           lastSyncedAt: new Date().toISOString(),
-        },
+        }),
+        attachments: savedEntry.attachments.map((attachment) => ({
+          ...attachment,
+          sourceUrl: attachment.qiniuKey ? sourceUrlByKey.get(attachment.qiniuKey) ?? attachment.sourceUrl : attachment.sourceUrl,
+        })),
       }
     },
 

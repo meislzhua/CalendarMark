@@ -20,6 +20,8 @@ export type Attachment = {
     kind: 'file' | 'external'
     value: Record<string, unknown>
   }
+  /** 七牛对象键。与 Notion 的 remoteId 分开保存，支持同一条本地记录同步到多个远程源 */
+  qiniuKey?: string
 }
 
 export type EntryRemoteRef = {
@@ -40,6 +42,8 @@ export type CalendarEntry = {
   mood?: string
   updatedAt: string
   remote?: EntryRemoteRef
+  /** 各远程源的稳定引用；remote 仍表示最近一次同步的源，兼容旧数据 */
+  remoteRefs?: Partial<Record<'notion' | 'qiniu', EntryRemoteRef>>
 }
 
 export const MOOD_OPTIONS = ['😊', '😐', '😢', '😴', '😑', '😤', '🤩'] as const
