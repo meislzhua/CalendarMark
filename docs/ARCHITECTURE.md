@@ -117,9 +117,11 @@ Android 不创建桌面托盘，相关代码由 `#[cfg(desktop)]` 排除；React
 `src-tauri/src/qiniu.rs` 同样基于 `reqwest` + Rustls，不引入七牛 SDK，签名算法按官方文档实现（`hmac` + `sha1` + URL-safe Base64）：
 
 - 管理凭证（`Authorization: Qiniu AK:sign`）：签名串 = `Method Path?Query\nHost: host\n[Content-Type: ct]\n\n[body]`，用于空间列表、创建空间、设为私有、空间域名和 `/v6/space` 用量统计。
+- URL-safe Base64 必须保留 `=` padding（与官方 SDK 的 `base64.URLEncoding` 一致）：HMAC-SHA1 签名编码后为 28 字符；去掉 padding 会被服务端判定 bad token（401）。
 - 上传凭证（表单上传）：`AK:urlsafe(HMAC-SHA1(encodedPolicy)):urlsafe(policy)`，policy 限定 `scope=bucket:key` 与 deadline，按区域选择上传域名。
 - 下载凭证（私有空间）：`domain/key?e=deadline&token=AK:sign`，纯本地 HMAC 计算，无需网络请求即可生成附件预览/外链。
-- 对象管理：`/list/2` 前缀列举、`/delete/<EncodedEntryURI>` 删除（612 幂等处理），读取经签名下载链接取回内容。
+- 对象管理：v1 `POST {rsf.qiniu.com}/list` 前缀列举、`POST {rs.qiniu.com}/delete/<EncodedEntryURI>` 删除（612 幂等处理），读取经签名下载链接取回内容。rs/rsf 使用中心域名自动路由到空间真实区域，避免用户选错区域导致 `incorrect zone`。
+- 区域自动识别：选择空间时调用 `GET /v2/query?ak=&bucket=` 获取空间真实区域（如 z2）并写回设置；上传域名与 `/v6/space` 用量统计都依赖正确区域（区域错误时用量会静默返回 0）。
 - `mkbucketv3` 创建空间成功后立即调用 `/private?bucket=..&private=1`，保证快捷创建的空间一定是私有空间。
 
 ## 4. 数据模型

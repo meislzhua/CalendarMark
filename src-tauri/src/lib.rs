@@ -59,6 +59,7 @@ pub fn run() {
             qiniu::qiniu_regions,
             qiniu::qiniu_create_bucket,
             qiniu::qiniu_bucket_domains,
+            qiniu::qiniu_query_region,
             qiniu::qiniu_get_usage,
             qiniu::qiniu_list_keys,
             qiniu::qiniu_get_object,

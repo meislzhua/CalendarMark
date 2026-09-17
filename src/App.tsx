@@ -102,6 +102,7 @@ import {
   listQiniuBucketDomains,
   listQiniuBuckets,
   listQiniuRegions,
+  queryQiniuBucketRegion,
 } from './qiniu'
 import type { QiniuUsage } from './qiniu'
 import type { QiniuRegionOption } from './types'
@@ -1827,11 +1828,17 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
       setBuckets(list)
       const keepBucket = list.includes(settings.qiniuBucket.trim()) ? settings.qiniuBucket.trim() : ''
       let nextDomain = settings.qiniuDomain
+      let nextRegion = settings.qiniuRegion
       if (keepBucket) {
-        const domains = await listQiniuBucketDomains(accessKey, secretKey, keepBucket)
+        // 自动识别空间真实区域：区域选错会导致上传失败、用量统计静默返回 0
+        const [domains, region] = await Promise.all([
+          listQiniuBucketDomains(accessKey, secretKey, keepBucket),
+          queryQiniuBucketRegion(accessKey, secretKey, keepBucket).catch(() => ''),
+        ])
         nextDomain = domains[0] ?? nextDomain
+        nextRegion = region || nextRegion
       }
-      update({ qiniuBucket: keepBucket, qiniuDomain: nextDomain })
+      update({ qiniuBucket: keepBucket, qiniuDomain: nextDomain, qiniuRegion: nextRegion })
       onNotice(`已连接七牛账号，发现 ${list.length} 个空间`)
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error))
@@ -1844,9 +1851,13 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
     update({ qiniuBucket: bucket, qiniuDomain: '' })
     if (!accessKey || !secretKey) return
     try {
-      const domains = await listQiniuBucketDomains(accessKey, secretKey, bucket)
-      update({ qiniuBucket: bucket, qiniuDomain: domains[0] ?? '' })
+      const [domains, region] = await Promise.all([
+        listQiniuBucketDomains(accessKey, secretKey, bucket),
+        queryQiniuBucketRegion(accessKey, secretKey, bucket).catch(() => ''),
+      ])
+      update({ qiniuBucket: bucket, qiniuDomain: domains[0] ?? '', qiniuRegion: region || settings.qiniuRegion })
       if (!domains.length) onNotice('空间没有可用域名；附件下载需要空间绑定域名（新空间可能需要几分钟）')
+      if (region) onNotice(`已选择空间「${bucket}」（区域 ${region}，已自动识别）`)
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error))
     }
@@ -1913,7 +1924,7 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
       />
       <label className="field-label">
         <span>存储区域</span>
-        <span className="field-hint">新建空间后所在区域不可修改</span>
+        <span className="field-hint">用于创建新空间；选择已有空间时自动识别真实区域</span>
       </label>
       <select className="settings-input" value={settings.qiniuRegion} onChange={(event) => update({ qiniuRegion: event.target.value })}>
         {(regions.length ? regions : [{ id: 'z0', label: '华东-浙江' }]).map((region) => (

@@ -1,4 +1,4 @@
-use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as URLSAFE};
+use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE as URLSAFE};
 use base64::Engine as _;
 use futures::future::join_all;
 use hmac::{Hmac, Mac};
@@ -10,6 +10,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const UC_HOST: &str = "https://uc.qiniuapi.com";
 const API_HOST: &str = "https://api.qiniuapi.com";
+/// 中心域名会自动路由到空间真实区域，避免用户选错区域导致 incorrect zone / 静默返回 0
+const RS_CENTRAL_HOST: &str = "https://rs.qiniu.com";
+const RSF_CENTRAL_HOST: &str = "https://rsf.qiniu.com";
 const DEFAULT_REGION: &str = "z0";
 const USER_AGENT: &str = "CalendarMark/0.2.2";
 const LIST_PAGE_SIZE: u32 = 1000;
@@ -126,6 +129,8 @@ fn hmac_sha1_urlsafe(secret_key: &str, data: &str) -> String {
     let mut mac = HmacSha1::new_from_slice(secret_key.as_bytes())
         .expect("HMAC-SHA1 accepts any key length");
     mac.update(data.as_bytes());
+    // 官方 SDK 使用带 padding 的 URL-safe Base64（URLEncoding）。
+    // HMAC-SHA1 签名编码后是 28 字符、以 "=" 结尾；去掉 padding 会被七牛判定为 bad token（401）。
     URLSAFE.encode(mac.finalize().into_bytes())
 }
 
@@ -342,6 +347,9 @@ fn format_qiniu_error(context: &str, status: StatusCode, body: &str) -> String {
         403 => format!("{context}：七牛返回 403，当前密钥没有对应权限（或账号欠费）。"),
         614 => format!("{context}：同名空间已存在，可直接选择该空间。"),
         631 => format!("{context}：空间不存在，请确认空间名称和区域。"),
+        _ if detail.contains("incorrect zone") => format!(
+            "{context}：空间不在所选区域。选择空间时会自动识别真实区域，请重新点击该空间。"
+        ),
         _ => format!("{context}：七牛 API {} {}", status.as_u16(), detail),
     }
 }
@@ -439,6 +447,42 @@ pub async fn qiniu_bucket_domains(raw: QiniuRawCredential, bucket: String) -> Re
     }
     serde_json::from_str::<Vec<String>>(&body)
         .map_err(|error| format!("解析七牛空间域名失败：{error}"))
+}
+
+/// 通过 UC /v2/query 自动识别空间所在区域（如 z0/z2），
+/// 用于上传域名选择和用量统计，避免用户手选区域出错。
+#[tauri::command]
+pub async fn qiniu_query_region(
+    raw: QiniuRawCredential,
+    bucket: String,
+) -> Result<String, String> {
+    let credential = parse_credential(&raw)?;
+    let bucket = bucket.trim().to_string();
+    if bucket.is_empty() {
+        return Err("请先选择空间。".to_string());
+    }
+    let client = qiniu_client()?;
+    let query = format!(
+        "/v2/query?ak={}&bucket={}",
+        url_encode_component(&credential.access_key),
+        url_encode_component(&bucket)
+    );
+    let (status, body) =
+        management_request(&client, &credential, UC_HOST, Method::GET, &query, None).await?;
+    if !status.is_success() {
+        return Err(format_qiniu_error("识别空间区域失败", status, &body));
+    }
+    let parsed: Value = serde_json::from_str(&body)
+        .map_err(|error| format!("解析空间区域失败：{error}"))?;
+    let region = parsed
+        .get("region")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if region.is_empty() {
+        return Err("七牛没有返回空间区域，请确认空间存在。".to_string());
+    }
+    Ok(region)
 }
 
 fn format_stats_time(timestamp: u64) -> String {
@@ -557,19 +601,20 @@ async fn list_object_keys(
     region: &str,
     prefix: &str,
 ) -> Result<Vec<String>, String> {
-    let (_, _, _, _, rsf_host) = region_config(region);
+    let _ = region;
     let mut keys = Vec::new();
     let mut marker = String::new();
     loop {
+        // 官方 v1 资源列举：POST {rsf}/list?bucket=&prefix=&limit=&marker=
         let query = format!(
-            "/list/2?bucket={}&prefix={}&limit={}&marker={}",
+            "/list?bucket={}&prefix={}&limit={}&marker={}",
             url_encode_component(bucket),
             url_encode_component(prefix),
             LIST_PAGE_SIZE,
             url_encode_component(&marker)
         );
         let (status, body) =
-            management_request(client, credential, &format!("https://{rsf_host}"), Method::GET, &query, None)
+            management_request(client, credential, RSF_CENTRAL_HOST, Method::POST, &query, None)
                 .await?;
         if !status.is_success() {
             return Err(format_qiniu_error("读取对象列表失败", status, &body));
@@ -788,13 +833,13 @@ pub async fn qiniu_delete_object(
     key: String,
 ) -> Result<(), String> {
     let credential = parse_credential(&raw)?;
-    let (_, _, _, rs_host, _) = region_config(&region);
+    let _ = region;
     let path = format!("/delete/{}", encoded_entry(bucket.trim(), &key));
     let client = qiniu_client()?;
     let (status, body) = management_request(
         &client,
         &credential,
-        &format!("https://{rs_host}"),
+        RS_CENTRAL_HOST,
         Method::POST,
         &path,
         None,
@@ -912,7 +957,9 @@ mod tests {
         assert!(authorization.contains(':'));
         let parts: Vec<&str> = authorization[6..].splitn(3, ':').collect();
         assert_eq!(parts[0], "ak".repeat(20));
-        assert_eq!(parts[1].len(), 27); // HMAC-SHA1 的 URL-safe Base64
+        // HMAC-SHA1 的 URL-safe Base64：带 padding 共 28 字符，且以 "=" 结尾
+        assert_eq!(parts[1].len(), 28);
+        assert!(parts[1].ends_with('='));
     }
 
     #[test]
@@ -924,7 +971,7 @@ mod tests {
         let token = build_upload_token(&credential, "calendarmark", "date/2026-09-17.json", 1900000000);
         let parts: Vec<&str> = token.splitn(3, ':').collect();
         assert_eq!(parts[0], "ak".repeat(20));
-        assert_eq!(parts[1].len(), 27);
+        assert_eq!(parts[1].len(), 28);
         let policy = String::from_utf8(
             URLSAFE
                 .decode(parts[2])

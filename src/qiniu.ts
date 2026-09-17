@@ -62,6 +62,11 @@ export async function listQiniuBucketDomains(accessKey: string, secretKey: strin
   return invoke<string[]>('qiniu_bucket_domains', { raw: raw(accessKey, secretKey), bucket })
 }
 
+export async function queryQiniuBucketRegion(accessKey: string, secretKey: string, bucket: string): Promise<string> {
+  ensureTauriRuntime()
+  return invoke<string>('qiniu_query_region', { raw: raw(accessKey, secretKey), bucket })
+}
+
 export async function getQiniuUsage(accessKey: string, secretKey: string, bucket: string, region: string): Promise<QiniuUsage> {
   ensureTauriRuntime()
   return invoke<QiniuUsage>('qiniu_get_usage', { raw: raw(accessKey, secretKey), bucket, region })
