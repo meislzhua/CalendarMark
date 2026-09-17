@@ -69,6 +69,7 @@ import {
   readAutostartEnabled,
   setAutostartEnabled,
   hideMainWindow,
+  isAndroidTauriRuntime,
   isDesktopTauriRuntime,
   listenForSettingsOpen,
   onWindowFocusChanged,
@@ -1090,13 +1091,19 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
   const [newTag, setNewTag] = useState('')
   const settingsScrollRef = useRef<HTMLElement | null>(null)
   const suppressSpyRef = useRef(false)
-  const sections: { id: SettingsSection; label: string; description: string; icon: typeof Database }[] = [
+  const isAndroid = isAndroidTauriRuntime()
+  const allSections: { id: SettingsSection; label: string; description: string; icon: typeof Database }[] = [
     { id: 'source', label: '数据源', description: '选择数据来源', icon: Database },
     { id: 'system', label: '系统', description: '启动与快捷键', icon: Power },
-    { id: 'interface', label: '界面', description: '调整显示方式', icon: Palette },
+    { id: 'interface', label: '界面', description: isAndroid ? '选择主题' : '调整显示方式', icon: Palette },
     { id: 'tags', label: '标签管理', description: '整理你的分类', icon: TagIcon },
   ]
+  const sections = allSections.filter((section) => !isAndroid || section.id !== 'system')
   const update = (partial: Partial<AppSettings>) => onChangeSettings((previous) => ({ ...previous, ...partial }))
+
+  useEffect(() => {
+    if (isAndroid && settingsSection === 'system') setSettingsSection('source')
+  }, [isAndroid, settingsSection])
 
   // 侧栏等外部入口指定跳转到某个设置分区
   useEffect(() => {
@@ -1186,12 +1193,12 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
         <div className="settings-section" id="settings-section-source" data-section="source">
           <DataSourceSettings settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} onReloadRemote={onReloadRemote} />
         </div>
-        <div className="settings-section" id="settings-section-system" data-section="system">
+        {!isAndroid && <div className="settings-section" id="settings-section-system" data-section="system">
           <SystemSettings settings={settings} onChangeSettings={onChangeSettings} shortcutState={shortcutState} onNotice={onNotice} />
-        </div>
+        </div>}
         <div className="settings-section" id="settings-section-interface" data-section="interface">
           <SettingsTitle icon={<Palette size={18} />} eyebrow="界面" title="选择让你感觉舒服的明暗" description="主题设置会立即应用到 CalendarMark 的所有界面。" />
-          <div className="ui-mode-options">
+          {!isAndroid && <div className="ui-mode-options">
             <button type="button" className={`ui-mode-option ${settings.uiMode === 'window' ? 'ui-mode-option--active' : ''}`} onClick={() => update({ uiMode: 'window' })}>
               <AppWindow size={18} />
               <span><strong>窗口模式</strong><small>常规桌面窗口，完整双栏布局</small></span>
@@ -1202,9 +1209,9 @@ function SettingsView({ settings, settingsSection, setSettingsSection, onChangeS
               <span><strong>抽屉模式</strong><small>贴屏幕右侧的窄边栏，桌面端专属</small></span>
               {settings.uiMode === 'drawer' && <Check size={15} />}
             </button>
-          </div>
+          </div>}
           <div className="theme-options"><ThemeOption icon={<Sun size={18} />} title="浅色" description="干净明亮的纸张感" active={settings.theme === 'light'} onClick={() => update({ theme: 'light' })} /><ThemeOption icon={<Moon size={18} />} title="深色" description="夜间记录更舒适" active={settings.theme === 'dark'} onClick={() => update({ theme: 'dark' })} /><ThemeOption icon={<Monitor size={18} />} title="跟随系统" description="随系统自动切换" active={settings.theme === 'auto'} onClick={() => update({ theme: 'auto' })} /></div>
-          <div className="preference-card"><div className="preference-row"><div className="preference-copy"><strong>启动时显示上次浏览的月份</strong><span>下次打开时保留你的浏览上下文</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div><div className="preference-row"><div className="preference-copy"><strong>关闭窗口时保留在托盘</strong><span>点击右上角关闭只隐藏窗口，不退出应用</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div></div>
+          {!isAndroid && <div className="preference-card"><div className="preference-row"><div className="preference-copy"><strong>启动时显示上次浏览的月份</strong><span>下次打开时保留你的浏览上下文</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div><div className="preference-row"><div className="preference-copy"><strong>关闭窗口时保留在托盘</strong><span>点击右上角关闭只隐藏窗口，不退出应用</span></div><span className="toggle-switch toggle-switch--on"><span /></span></div></div>}
         </div>
         <div className="settings-section" id="settings-section-tags" data-section="tags">
           <SettingsTitle icon={<TagIcon size={18} />} eyebrow="标签管理" title="让标签替你整理生活的纹理" description="快捷标签会显示在日历格子和记录抽屉里；停用只是不再提供选择，已有记录保持不变。" />
@@ -1414,7 +1421,7 @@ function DataSourceSettings({ settings, onChangeSettings, entries, onChangeEntri
       })}
     </div>
     {selectedSource.id === 'notion' && <NotionSourceSettings settings={settings} onChangeSettings={onChangeSettings} onNotice={onNotice} onReloadRemote={onReloadRemote} />}
-    {selectedSource.id === 'local' && <LocalSourceSettings settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} onSelectNotion={() => update({ dataSource: 'notion' })} />}
+    {selectedSource.id === 'local' && <LocalSourceSettings settings={settings} onChangeSettings={onChangeSettings} entries={entries} onChangeEntries={onChangeEntries} tags={tags} onChangeTags={onChangeTags} onNotice={onNotice} onSelectNotion={() => update({ dataSource: 'notion' })} onSelectQiniu={() => update({ dataSource: 'qiniu' })} />}
     {selectedSource.id === 'qiniu' && <QiniuSourceSettings settings={settings} onChangeSettings={onChangeSettings} onNotice={onNotice} onReloadRemote={onReloadRemote} />}
     {selectedSource.status === 'planned' && <PlannedSourceSettings sourceId={selectedSource.id} />}
   </>
@@ -1440,6 +1447,7 @@ type NotionSourceSettingsProps = {
 function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRemote }: NotionSourceSettingsProps) {
   const [connection, setConnection] = useState<NotionConnectionInfo | null>(null)
   const [discoveredDatasets, setDiscoveredDatasets] = useState<NotionDatasetOption[]>([])
+  const [discoveryAttempted, setDiscoveryAttempted] = useState(false)
   const [busy, setBusy] = useState<NotionBusyState>('idle')
   const [createOpen, setCreateOpen] = useState(false)
   const [parentPages, setParentPages] = useState<NotionPageOption[]>([])
@@ -1472,9 +1480,11 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
       return
     }
     setBusy('discovering')
+    setDiscoveryAttempted(false)
     try {
       const result = await discoverNotionDatasets(settings.notionToken)
       setDiscoveredDatasets(result.datasets)
+      setDiscoveryAttempted(true)
       onNotice(formatSyncNotice(`发现 ${result.datasets.length} 个可访问的数据集`, result.warnings))
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error))
@@ -1598,7 +1608,7 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
       <div className="source-divider" />
       <div className="source-fields">
         <label className="field-label" htmlFor="notion-token"><span>Integration Token</span><span className="field-hint"><KeyRound size={12} />仅保存在本机</span></label>
-        <input id="notion-token" className="settings-input" type="password" placeholder="secret_… 或 ntn_…" value={settings.notionToken} onChange={(event) => { update({ notionToken: event.target.value }); setConnection(null); setDiscoveredDatasets([]) }} />
+        <input id="notion-token" className="settings-input" type="password" placeholder="secret_… 或 ntn_…" value={settings.notionToken} onChange={(event) => { update({ notionToken: event.target.value }); setConnection(null); setDiscoveredDatasets([]); setDiscoveryAttempted(false) }} />
         <button
           type="button"
           className="text-button notion-token-help"
@@ -1659,6 +1669,10 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
               <button type="button" className={saved ? 'secondary-button' : 'primary-button'} disabled={saved || busy !== 'idle'} onClick={() => handleAddDataset(dataset)}>{saved ? '已添加' : '添加数据集'}</button>
             </div>
           })}</div>
+        </div>}
+        {discoveryAttempted && discoveredDatasets.length === 0 && <div className="notion-discovered-panel">
+          <div className="notion-discovered-heading"><strong>没有发现可访问的数据集</strong><span>API 调用成功，但这个 Integration 还没有任何共享数据源</span></div>
+          <div className="notion-dataset-empty">请到 Notion 打开目标数据库或其所在页面，点击「··· → Connections」选择这个 Integration。共享后回到这里再次点击「发现数据集」。</div>
         </div>}
       </div>
       {connection && connection.dataSources.length > 1 && <div className="notion-data-source-picker"><label className="field-label" htmlFor="notion-data-source"><span>当前 Database 的 data source</span><span className="field-hint">也可以从连接结果切换</span></label><select id="notion-data-source" className="settings-input" value={activeDataSourceId} onChange={(event) => { const source = connection.dataSources.find((item) => item.id === event.target.value); if (!source) return; rememberDataset({ databaseId: connection.databaseId, databaseTitle: connection.databaseTitle, dataSourceId: source.id, dataSourceName: source.name }); setConnection(null) }}>{connection.dataSources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</select></div>}
@@ -1763,13 +1777,16 @@ type LocalSourceSettingsProps = {
   onChangeTags: (tags: Tag[]) => void
   onNotice: (message: string) => void
   onSelectNotion: () => void
+  onSelectQiniu: () => void
 }
 
-function LocalSourceSettings({ settings, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onNotice, onSelectNotion }: LocalSourceSettingsProps) {
+function LocalSourceSettings({ settings, onChangeSettings, entries, onChangeEntries, tags, onChangeTags, onNotice, onSelectNotion, onSelectQiniu }: LocalSourceSettingsProps) {
   const [busy, setBusy] = useState<'idle' | 'pulling' | 'pushing'>('idle')
   const savedDatasets = settings.notionDatasets ?? []
   const selectedDataset = getActiveNotionDataset(settings)
-  const isConfigured = Boolean(settings.notionToken.trim() && selectedDataset?.databaseId)
+  const qiniuPrefix = settings.qiniuPrefix.trim() || 'calendarmark'
+  const isQiniuConfigured = Boolean(settings.qiniuAccessKey.trim() && settings.qiniuSecretKey.trim() && settings.qiniuBucket.trim())
+  const remoteCount = savedDatasets.length + (isQiniuConfigured ? 1 : 0)
 
   async function handlePull() {
     const dataset = getActiveNotionDataset(settings)
@@ -1822,7 +1839,7 @@ function LocalSourceSettings({ settings, onChangeSettings, entries, onChangeEntr
         <div className="local-source-body"><p>当前日历使用本机数据，保存会立即写入本地。已绑定的远程数据集可以按需拉取到本地，或将本地记录推送到远程。</p><div className="local-source-points"><span><Check size={14} />离线可用</span><span><Check size={14} />本地优先</span><span><Check size={14} />按需同步</span></div></div>
       </div>
       <div className="source-card source-card--remote-sync">
-        <div className="source-card-top"><div className="notion-logo">N</div><div><strong>已绑定的 Notion 数据集</strong><span>只列出本机已添加的远程数据集</span></div><span className="connection-badge"><span className={`status-dot ${isConfigured ? 'status-dot--ready' : 'status-dot--muted'}`} />{isConfigured ? '待同步' : '未绑定'}</span></div>
+        <div className="source-card-top"><div className="source-placeholder-icon"><Cloud size={18} /></div><div><strong>已绑定的远程数据源</strong><span>Notion 数据集和七牛 Kodo 空间都会显示在这里</span></div><span className="connection-badge"><span className={`status-dot ${remoteCount ? 'status-dot--ready' : 'status-dot--muted'}`} />{remoteCount ? `${remoteCount} 个已绑定` : '未绑定'}</span></div>
         <div className="source-divider" />
         {savedDatasets.length > 0
           ? <>
@@ -1845,10 +1862,27 @@ function LocalSourceSettings({ settings, onChangeSettings, entries, onChangeEntr
               ? <div className="source-card-footer source-card-footer--notion"><span><RefreshCw size={15} className={busy !== 'idle' ? 'spin' : ''} />{busy === 'pulling' ? '正在从 Notion 拉取…' : busy === 'pushing' ? '正在推送本地记录…' : '本地 ↔ 已选数据集'}</span><div className="notion-actions"><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handlePull() }}><ArrowLeft size={15} />拉取到本地</button><button type="button" className="primary-button" disabled={busy !== 'idle'} onClick={() => { void handlePush() }}><Cloud size={15} />推送到 Notion</button></div></div>
               : <div className="local-sync-empty"><span>数据集需要配合 Integration Token 使用。</span><button type="button" className="secondary-button" onClick={onSelectNotion}>去 Notion 数据源配置 Token</button></div>}
           </>
-          : <div className="local-sync-empty"><div><strong>还没有绑定远程数据集</strong><span>在 Notion 数据源中完成连接并添加数据集后，这里会显示可同步的目标。</span></div><button type="button" className="secondary-button" onClick={onSelectNotion}><Database size={15} />去 Notion 数据源配置</button></div>}
+          : null}
+        {isQiniuConfigured && <div className="qiniu-bucket-list qiniu-bucket-list--sync">
+          <div className={'qiniu-bucket-option qiniu-bucket-option--active'}>
+            <div className="qiniu-bucket-copy">
+              <strong>{settings.qiniuBucket}</strong>
+              <small>七牛 Kodo · 区域 {settings.qiniuRegion || 'z0'} · 前缀 /{qiniuPrefix}</small>
+            </div>
+            <span className="qiniu-bucket-current">已绑定</span>
+          </div>
+          <div className="qiniu-bucket-hint">本地储存暂不支持七牛手动拉取/推送；切换为七牛数据源后，编辑会直接写入该空间。</div>
+        </div>}
+        {savedDatasets.length === 0 && !isQiniuConfigured && <div className="local-sync-empty">
+          <div><strong>还没有绑定远程数据源</strong><span>绑定 Notion 数据集或七牛空间后，这里会显示所有可同步目标。</span></div>
+          <div className="local-sync-actions">
+            <button type="button" className="secondary-button" onClick={onSelectNotion}><Database size={15} />配置 Notion</button>
+            <button type="button" className="secondary-button" onClick={onSelectQiniu}><Cloud size={15} />配置七牛</button>
+          </div>
+        </div>}
       </div>
     </div>
-    <div className="info-banner"><Sparkles size={16} /><span><strong>本地同步规则：</strong>CalendarMark 当前以本地记录为主；点击“拉取到本地”合并 Notion 数据，点击“推送到 Notion”将本地记录创建或更新到远端。想让每次编辑直接写远程？切换到 Notion 数据源即可。</span></div>
+    <div className="info-banner"><Sparkles size={16} /><span><strong>本地同步规则：</strong>CalendarMark 当前以本地记录为主；Notion 可手动拉取或推送，七牛显示已绑定空间并支持切换为直连数据源。想让每次编辑直接写远程？切换到 Notion 或七牛数据源即可。</span></div>
   </>
 }
 
@@ -1872,7 +1906,12 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
   const update = (partial: Partial<AppSettings>) => onChangeSettings((previous) => ({ ...previous, ...partial }))
   const accessKey = settings.qiniuAccessKey.trim()
   const secretKey = settings.qiniuSecretKey.trim()
+  const activeBucket = settings.qiniuBucket.trim()
   const isConfigured = Boolean(accessKey && secretKey && settings.qiniuBucket.trim())
+  const visibleBuckets = [
+    activeBucket,
+    ...buckets.map((bucket) => bucket.trim()).filter(Boolean),
+  ].filter((bucket, index, list) => bucket && list.indexOf(bucket) === index)
 
   useEffect(() => {
     void listQiniuRegions().then(setRegions).catch(() => setRegions([]))
@@ -2029,20 +2068,20 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
         <span>空间（Bucket）</span>
         <button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void connectBuckets() }}>
           <RefreshCw size={14} className={busy === 'connecting' ? 'spin' : ''} />
-          {buckets.length ? '刷新空间列表' : '连接并获取空间'}
+          {buckets.length ? '刷新空间列表' : activeBucket ? '刷新空间列表' : '连接并获取空间'}
         </button>
       </div>
     </div>
 
-    {buckets.length > 0 && (
-      <div className="notion-dataset-list notion-dataset-list--compact">
-        {buckets.map((bucket) => {
+    {visibleBuckets.length > 0 && (
+      <div className="qiniu-bucket-list">
+        {visibleBuckets.map((bucket) => {
           const active = settings.qiniuBucket === bucket
           return (
-            <div className={'notion-dataset-option' + (active ? ' notion-dataset-option--active' : '')} key={bucket}>
-              <button type="button" className="notion-dataset-select" onClick={() => { void selectBucket(bucket) }}>
-                <span className="notion-dataset-copy"><strong>{bucket}</strong><small>{active ? settings.qiniuRegion || 'z0' : '点击选择此空间'}</small></span>
-                {active && <span className="notion-dataset-current">同步目标</span>}
+            <div className={'qiniu-bucket-option' + (active ? ' qiniu-bucket-option--active' : '')} key={bucket}>
+              <button type="button" className="qiniu-bucket-select" onClick={() => { void selectBucket(bucket) }} aria-current={active ? 'true' : undefined}>
+                <span className="qiniu-bucket-copy"><strong>{bucket}</strong><small>{active ? `同步目标 · 区域 ${settings.qiniuRegion || 'z0'} · 前缀 /${settings.qiniuPrefix.trim() || 'calendarmark'}` : '点击设为同步目标'}</small></span>
+                {active && <span className="qiniu-bucket-current">当前</span>}
               </button>
             </div>
           )

@@ -2909,6 +2909,92 @@ input::placeholder {
   padding: 0;
 }
 
+.qiniu-bucket-list {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  margin: 0 21px 17px;
+}
+
+.qiniu-bucket-option {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  transition: border-color .18s ease, background .18s ease;
+}
+
+.qiniu-bucket-option--active {
+  border-color: #a9ccb6;
+  background: var(--green-tint);
+}
+
+.qiniu-bucket-select {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 0;
+  padding: 10px 11px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.qiniu-bucket-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+
+.qiniu-bucket-copy strong,
+.qiniu-bucket-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qiniu-bucket-copy strong {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.qiniu-bucket-copy small {
+  color: var(--ink-faint);
+  font-size: 9px;
+}
+
+.qiniu-bucket-current {
+  flex: none;
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: var(--green-soft);
+  color: var(--green-deep);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.qiniu-bucket-list--sync {
+  margin: 0;
+  padding: 0 17px 14px;
+}
+
+.qiniu-bucket-list--sync .qiniu-bucket-option {
+  align-items: center;
+  padding-right: 11px;
+}
+
+.qiniu-bucket-hint {
+  color: var(--ink-faint);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
 .local-sync-empty {
   display: flex;
   align-items: center;
@@ -2931,6 +3017,14 @@ input::placeholder {
 .local-sync-empty span {
   color: var(--ink-faint);
   font-size: 10px;
+}
+
+.local-sync-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
 }
 
 
@@ -3147,6 +3241,7 @@ html[data-ui-mode='drawer'] body {
   flex: 1 1 auto;
   flex-wrap: nowrap;
   min-width: 0;
+  overflow: hidden;
   margin-top: 0;
   border: 1px solid var(--line);
   border-radius: 11px;
@@ -3156,7 +3251,9 @@ html[data-ui-mode='drawer'] body {
 }
 
 [data-ui-mode='drawer'] .nav-item {
-  flex: 0 0 auto;
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
   min-height: 34px;
   border-radius: 8px;
   background: transparent;
@@ -3168,6 +3265,9 @@ html[data-ui-mode='drawer'] body {
 /* 窄窗口会同时命中移动断点（隐藏文字、压缩间距），这里恢复抽屉顶栏的横向标签形态 */
 [data-ui-mode='drawer'] .nav-item > span:first-of-type {
   display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

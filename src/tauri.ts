@@ -18,6 +18,7 @@ declare global {
 
 export const isTauriRuntime = (): boolean => Boolean(window.__TAURI_INTERNALS__)
 export const isDesktopTauriRuntime = (): boolean => isTauriRuntime() && !/Android|iPhone|iPad/i.test(navigator.userAgent)
+export const isAndroidTauriRuntime = (): boolean => isTauriRuntime() && /Android/i.test(navigator.userAgent)
 
 let registeredShortcut: string | null = null
 let registeredHandler: (() => void) | null = null
