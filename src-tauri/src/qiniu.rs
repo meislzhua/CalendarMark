@@ -87,6 +87,14 @@ pub struct QiniuRegionOption {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct QiniuObjectUpload {
+    pub key: String,
+    pub data_base64: String,
+    pub content_type: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QiniuRawCredential {
     pub access_key: String,
     pub secret_key: String,
@@ -724,31 +732,39 @@ async fn fetch_object_bytes(
     domain: &str,
     key: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    let url = build_private_download_url(credential, domain, key, DOWNLOAD_TTL_SECONDS);
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|error| format!("下载七牛对象失败：{error}"))?;
-    if response.status() == StatusCode::NOT_FOUND || response.status().as_u16() == 612 {
-        return Ok(None);
+    let mut last_error = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(150 * attempt as u64)).await;
+        }
+
+        let url = build_private_download_url(credential, domain, key, DOWNLOAD_TTL_SECONDS);
+        let response = match client.get(&url).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = format!("下载七牛对象失败：{error}");
+                continue;
+            }
+        };
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND || status.as_u16() == 612 {
+            return Ok(None);
+        }
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(format!(
+                "下载 {key} 失败：下载凭证被拒绝，请检查密钥与空间域名。"
+            ));
+        }
+        if !status.is_success() {
+            last_error = format!("下载 {key} 失败：七牛返回 {}", status.as_u16());
+            continue;
+        }
+        return match response.bytes().await {
+            Ok(bytes) => Ok(Some(bytes.to_vec())),
+            Err(error) => Err(format!("读取 {key} 内容失败：{error}")),
+        };
     }
-    if response.status() == StatusCode::UNAUTHORIZED {
-        return Err(format!(
-            "下载 {key} 失败：下载凭证被拒绝，请检查密钥与空间域名。"
-        ));
-    }
-    if !response.status().is_success() {
-        return Err(format!(
-            "下载 {key} 失败：七牛返回 {}",
-            response.status().as_u16()
-        ));
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| format!("读取 {key} 内容失败：{error}"))?;
-    Ok(Some(bytes.to_vec()))
+    Err(last_error)
 }
 
 #[tauri::command]
@@ -859,6 +875,68 @@ pub async fn qiniu_put_object(
     // 再选择官方源站上传域名，避免区域设置陈旧时出现 incorrect region。
     let _ = region;
     let client = qiniu_client()?;
+    let upload_host = resolve_upload_host(&client, &credential, &bucket).await?;
+    upload_object(
+        &client,
+        &credential,
+        &bucket,
+        &upload_host,
+        &key,
+        &data_base64,
+        &content_type,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn qiniu_put_objects(
+    raw: QiniuRawCredential,
+    bucket: String,
+    region: String,
+    objects: Vec<QiniuObjectUpload>,
+) -> Result<(), String> {
+    let credential = parse_credential(&raw)?;
+    let _ = region;
+    let bucket = bucket.trim().to_string();
+    if bucket.is_empty() {
+        return Err("请先选择七牛空间。".to_string());
+    }
+    if objects.is_empty() {
+        return Ok(());
+    }
+
+    let client = qiniu_client()?;
+    let upload_host = resolve_upload_host(&client, &credential, &bucket).await?;
+    let client_ref = &client;
+    let credential_ref = &credential;
+    let bucket_ref = bucket.as_str();
+    let upload_host_ref = upload_host.as_str();
+    for chunk in objects.chunks(6) {
+        let futures = chunk.iter().map(|object| async move {
+            upload_object(
+                client_ref,
+                credential_ref,
+                bucket_ref,
+                upload_host_ref,
+                &object.key,
+                &object.data_base64,
+                &object.content_type,
+            )
+            .await
+        });
+        let results = join_all(futures).await;
+        for result in results {
+            result?;
+        }
+    }
+    Ok(())
+}
+
+async fn resolve_upload_host(
+    client: &Client,
+    credential: &QiniuCredential,
+    bucket: &str,
+) -> Result<String, String> {
     let query = format!(
         "/v2/query?ak={}&bucket={}",
         url_encode_component(&credential.access_key),
@@ -881,6 +959,18 @@ pub async fn qiniu_put_object(
         .find(|(id, _, _, _, _)| *id == region_id)
         .map(|(_, _, upload_host, _, _)| *upload_host)
         .ok_or_else(|| format!("七牛空间区域 {region_id} 暂不支持上传，请更新应用。"))?;
+    Ok(upload_host.to_string())
+}
+
+async fn upload_object(
+    client: &Client,
+    credential: &QiniuCredential,
+    bucket: &str,
+    upload_host: &str,
+    key: &str,
+    data_base64: &str,
+    content_type: &str,
+) -> Result<(), String> {
     let data = BASE64
         .decode(data_base64.trim())
         .map_err(|error| format!("附件数据无法解码：{error}"))?;
@@ -889,8 +979,8 @@ pub async fn qiniu_put_object(
     }
     let upload_token = build_upload_token(
         &credential,
-        &bucket,
-        &key,
+        bucket,
+        key,
         now_unix() + UPLOAD_DEADLINE_SECONDS,
     );
     let mime = if content_type.trim().is_empty() {
@@ -900,7 +990,7 @@ pub async fn qiniu_put_object(
     };
     let file_name = key.rsplit('/').next().unwrap_or("attachment");
     let form = multipart::Form::new()
-        .text("key", key.clone())
+        .text("key", key.to_string())
         .text("token", upload_token)
         .part(
             "file",
@@ -958,6 +1048,57 @@ pub async fn qiniu_delete_object(
     ))
 }
 
+#[tauri::command]
+pub async fn qiniu_delete_objects(
+    raw: QiniuRawCredential,
+    bucket: String,
+    region: String,
+    keys: Vec<String>,
+) -> Result<(), String> {
+    let credential = parse_credential(&raw)?;
+    let _ = region;
+    let bucket = bucket.trim().to_string();
+    if bucket.is_empty() {
+        return Err("请先选择七牛空间。".to_string());
+    }
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let client = qiniu_client()?;
+    let client_ref = &client;
+    let credential_ref = &credential;
+    let bucket_ref = bucket.as_str();
+    for chunk in keys.chunks(6) {
+        let futures = chunk.iter().map(|key| async move {
+            let path = format!("/delete/{}", encoded_entry(bucket_ref, key));
+            let (status, body) = management_request(
+                client_ref,
+                credential_ref,
+                RS_CENTRAL_HOST,
+                Method::POST,
+                &path,
+                None,
+            )
+            .await?;
+            if status.is_success() || status.as_u16() == 612 {
+                Ok(())
+            } else {
+                Err(format_qiniu_error(
+                    &format!("删除 {key} 失败"),
+                    status,
+                    &body,
+                ))
+            }
+        });
+        let results = join_all(futures).await;
+        for result in results {
+            result?;
+        }
+    }
+    Ok(())
+}
+
 /// 并发读取一组小 JSON 对象（日期文档/标签索引），不存在的键返回 None。
 #[tauri::command]
 pub async fn qiniu_get_objects(
@@ -979,18 +1120,21 @@ pub async fn qiniu_get_objects(
     } else {
         domain
     };
+    let mut results = Vec::with_capacity(keys.len());
     let client_ref = &client;
     let credential_ref = &credential;
     let domain_ref = domain.as_str();
-    let futures = keys.into_iter().map(|key| async move {
-        fetch_object_bytes(client_ref, credential_ref, domain_ref, &key)
-            .await
-            .map(|bytes| bytes.map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
-    });
-    let results = join_all(futures)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, String>>()?;
+    for chunk in keys.chunks(8) {
+        let futures = chunk.iter().map(|key| async move {
+            fetch_object_bytes(client_ref, credential_ref, domain_ref, key)
+                .await
+                .map(|bytes| bytes.map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
+        });
+        let chunk_results = join_all(futures).await;
+        for result in chunk_results {
+            results.push(result?);
+        }
+    }
     Ok(results)
 }
 

@@ -6,12 +6,11 @@ import {
   QINIU_TAGS_META_KEY,
   qiniuDayKey,
   qiniuFileKey,
-  readQiniuDayDocument,
+  qiniuTagIndexKey,
   readQiniuObjects,
-  syncQiniuTagIndexes,
   toNotionEntryInput,
   toQiniuDayDocument,
-  writeQiniuJson,
+  utf8ToBase64,
   type QiniuTarget,
 } from './data-source'
 import { pullNotionEntries, pushNotionEntries } from './notion'
@@ -19,10 +18,11 @@ import type { NotionPushResult } from './notion'
 import {
   getQiniuAttachmentDataUrl,
   listQiniuKeys,
-  putQiniuObject,
+  putQiniuObjects,
   signQiniuDownloadUrls,
+  deleteQiniuObjects,
 } from './qiniu'
-import type { QiniuDayDocument } from './qiniu'
+import type { QiniuDayDocument, QiniuObjectInput, QiniuTagIndex } from './qiniu'
 
 export type RemoteSyncDirection = 'pull' | 'push'
 
@@ -293,6 +293,67 @@ async function hydrateQiniuLocalEntries(
   })))
 }
 
+type QiniuTagEntrySummary = {
+  id: string
+  title: string
+  tagNames: string[]
+}
+
+function buildQiniuTagIndexes(
+  date: string,
+  dayEntryTags: QiniuTagEntrySummary[],
+): Map<string, QiniuTagIndex> {
+  const grouped = new Map<string, QiniuTagIndex>()
+  for (const entry of dayEntryTags) {
+    for (const tagName of entry.tagNames) {
+      const current = grouped.get(tagName)
+      grouped.set(tagName, {
+        date,
+        title: current?.title || entry.title || '未命名记录',
+        entryIds: [...(current?.entryIds ?? []), entry.id],
+      })
+    }
+  }
+  return grouped
+}
+
+function qiniuJsonObject(key: string, value: unknown): QiniuObjectInput {
+  return {
+    key,
+    dataBase64: utf8ToBase64(JSON.stringify(value, null, 2)),
+    contentType: 'application/json',
+  }
+}
+
+function shouldReplaceQiniuJson(text: string | null | undefined, value: unknown): boolean {
+  if (!text) return true
+  try {
+    return JSON.stringify(JSON.parse(text)) !== JSON.stringify(value)
+  } catch {
+    return true
+  }
+}
+
+function qiniuTagIndexDate(key: string): string | null {
+    const match = /(\d{4}-\d{2}-\d{2})\.json$/.exec(key)
+    return match?.[1] ?? null
+}
+
+async function putQiniuObjectsChunked(
+  target: QiniuTarget,
+  objects: QiniuObjectInput[],
+): Promise<void> {
+  for (let index = 0; index < objects.length; index += 24) {
+    await putQiniuObjects(
+      target.accessKey,
+      target.secretKey,
+      target.bucket,
+      target.region,
+      objects.slice(index, index + 24),
+    )
+  }
+}
+
 function createQiniuSyncTarget(settings: AppSettings, configure?: () => void): RemoteSyncTarget {
   const target = qiniuTarget(settings)
   const configured = Boolean(target.accessKey && target.secretKey && target.bucket)
@@ -338,63 +399,107 @@ function createQiniuSyncTarget(settings: AppSettings, configure?: () => void): R
       const nameById = new Map(tags.map((tag) => [tag.id, tag.name]))
       const updatedEntries = entries.map((entry) => ({ ...entry, attachments: [...entry.attachments] }))
       const dates = Array.from(new Set(entries.map((entry) => entry.date))).sort()
-
-      for (const date of dates) {
-        const existing = await readQiniuDayDocument(target, date)
-        const previousTagNames = existing
-          ? Array.from(new Set(existing.entries.flatMap((record) => record.tagNames)))
-          : []
-
-        for (const entry of updatedEntries.filter((item) => item.date === date)) {
-          const existingRecord = existing?.entries.find((record) => record.id === entry.id)
-          entry.attachments = await Promise.all(entry.attachments.map(async (attachment) => {
-            const existingAttachment = existingRecord?.attachments.find((item) => item.id === attachment.id)
-              ?? existingRecord?.attachments.find((item) => item.name === attachment.name && item.mimeType === attachment.mimeType)
-            const currentKey = existingAttachment?.key ?? qiniuAttachmentKey(entry, attachment)
-            if (currentKey) return { ...attachment, qiniuKey: currentKey }
-            const key = qiniuFileKey(target.prefix, attachment.id, attachment.name)
-            if (attachment.dataUrl) {
-              const { mimeType, base64 } = parseDataUrl(attachment.dataUrl)
-              await putQiniuObject(
-                target.accessKey,
-                target.secretKey,
-                target.bucket,
-                target.region,
-                key,
-                base64,
-                attachment.mimeType || mimeType,
-              )
-              return { ...attachment, qiniuKey: key }
-            }
-            warnings.push(`记录 ${entry.title || date} 的附件 ${attachment.name} 缺少本地内容，仅同步了元数据。`)
-            return { ...attachment, qiniuKey: key }
-          }))
+      const dateSet = new Set(dates)
+      const dayKeys = dates.map((date) => qiniuDayKey(target.prefix, date))
+      const allTagIndexKeys = (await listQiniuKeys(
+        target.accessKey,
+        target.secretKey,
+        target.bucket,
+        target.region,
+        `${target.prefix}/tags/`,
+      )).filter((key) => dateSet.has(qiniuTagIndexDate(key) ?? ''))
+      const metaKey = `${target.prefix}/${QINIU_TAGS_META_KEY}`
+      const keysToRead = [...dayKeys, ...allTagIndexKeys, metaKey]
+      const existingTexts = await readQiniuObjectsChunked(target, keysToRead)
+      const textByKey = new Map(keysToRead.map((key, index) => [key, existingTexts[index]]))
+      const existingByDate = new Map(dates.map((date) => {
+        const text = textByKey.get(qiniuDayKey(target.prefix, date))
+        if (!text) return [date, null] as const
+        try {
+          const parsed = JSON.parse(text) as QiniuDayDocument
+          return [date, parsed?.date === date ? parsed : null] as const
+        } catch {
+          warnings.push(`七牛日期对象 ${qiniuDayKey(target.prefix, date)} 已损坏，推送时会重建。`)
+          return [date, null] as const
         }
+      }))
 
+      const attachmentUploads: QiniuObjectInput[] = []
+      for (const entry of updatedEntries) {
+        const existingRecord = existingByDate.get(entry.date)?.entries.find((record) => record.id === entry.id)
+        entry.attachments = entry.attachments.map((attachment) => {
+          const existingAttachment = existingRecord?.attachments.find((item) => item.id === attachment.id)
+            ?? existingRecord?.attachments.find((item) => item.name === attachment.name && item.mimeType === attachment.mimeType)
+          const currentKey = existingAttachment?.key ?? qiniuAttachmentKey(entry, attachment)
+          if (currentKey) return { ...attachment, qiniuKey: currentKey }
+
+          const key = qiniuFileKey(target.prefix, attachment.id, attachment.name)
+          if (attachment.dataUrl) {
+            const { mimeType, base64 } = parseDataUrl(attachment.dataUrl)
+            attachmentUploads.push({
+              key,
+              dataBase64: base64,
+              contentType: attachment.mimeType || mimeType,
+            })
+            return { ...attachment, qiniuKey: key }
+          }
+          warnings.push(`记录 ${entry.title || entry.date} 的附件 ${attachment.name} 缺少本地内容，仅同步了元数据。`)
+          return { ...attachment, qiniuKey: key }
+        })
+      }
+      await putQiniuObjectsChunked(target, attachmentUploads)
+
+      const jsonWrites: QiniuObjectInput[] = []
+      const expectedTagIndexKeys = new Set<string>()
+      for (const date of dates) {
+        const existing = existingByDate.get(date)
         const remoteOnly = mergeQiniuDayDocuments(existing ? [existing] : [], tags).entries
+          .filter((item) => !updatedEntries.some((entry) => entry.id === item.id))
         const dayEntriesById = new Map(remoteOnly.map((entry) => [entry.id, entry]))
         for (const entry of updatedEntries.filter((item) => item.date === date)) {
           dayEntriesById.set(entry.id, entry)
         }
         const dayEntries = Array.from(dayEntriesById.values())
-        if (dayEntries.length > 0) {
-          await writeQiniuJson(target, qiniuDayKey(target.prefix, date), toQiniuDayDocument(date, dayEntries, tags, target.prefix))
+        if (dayEntries.length === 0) continue
+
+        const dayKey = qiniuDayKey(target.prefix, date)
+        const dayDocument = toQiniuDayDocument(date, dayEntries, tags, target.prefix)
+        if (shouldReplaceQiniuJson(textByKey.get(dayKey), dayDocument)) {
+          jsonWrites.push(qiniuJsonObject(dayKey, dayDocument))
         }
-        await syncQiniuTagIndexes(
-          target,
-          date,
-          previousTagNames,
-          dayEntries.map((entry) => ({
-            id: entry.id,
-            title: entry.title,
-            tagNames: entry.tagIds.map((tagId) => nameById.get(tagId)).filter((name): name is string => Boolean(name)),
-          })),
+
+        const tagSummaries = dayEntries.map((entry) => ({
+          id: entry.id,
+          title: entry.title,
+          tagNames: entry.tagIds.map((tagId) => nameById.get(tagId)).filter((name): name is string => Boolean(name)),
+        })) satisfies QiniuTagEntrySummary[]
+        for (const [tagName, index] of buildQiniuTagIndexes(date, tagSummaries)) {
+          const key = qiniuTagIndexKey(target.prefix, tagName, date)
+          expectedTagIndexKeys.add(key)
+          if (shouldReplaceQiniuJson(textByKey.get(key), index)) {
+            jsonWrites.push(qiniuJsonObject(key, index))
+          }
+        }
+      }
+
+      const staleTagIndexKeys = allTagIndexKeys.filter((key) => !expectedTagIndexKeys.has(key))
+      if (staleTagIndexKeys.length > 0) {
+        await deleteQiniuObjects(
+          target.accessKey,
+          target.secretKey,
+          target.bucket,
+          target.region,
+          staleTagIndexKeys,
         )
       }
 
-      await writeQiniuJson(target, `${target.prefix}/${QINIU_TAGS_META_KEY}`, {
+      const tagsMeta = {
         tags: tags.map((tag) => ({ id: tag.id, name: tag.name, color: tag.color, retired: tag.retired ?? false })),
-      })
+      }
+      if (shouldReplaceQiniuJson(textByKey.get(metaKey), tagsMeta)) {
+        jsonWrites.push(qiniuJsonObject(metaKey, tagsMeta))
+      }
+      await putQiniuObjectsChunked(target, jsonWrites)
 
       const entriesWithRefs = withQiniuRefs(updatedEntries, target)
       return {

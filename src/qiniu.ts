@@ -36,6 +36,12 @@ export type QiniuTagIndex = {
   entryIds: string[]
 }
 
+export type QiniuObjectInput = {
+  key: string
+  dataBase64: string
+  contentType: string
+}
+
 function ensureTauriRuntime(): void {
   if (!isTauriRuntime()) {
     throw new Error('请在 Tauri 桌面版或 Android 版中使用七牛数据源')
@@ -129,6 +135,17 @@ export async function putQiniuObject(
   await invoke('qiniu_put_object', { raw: raw(accessKey, secretKey), bucket, region, key, dataBase64, contentType })
 }
 
+export async function putQiniuObjects(
+  accessKey: string,
+  secretKey: string,
+  bucket: string,
+  region: string,
+  objects: QiniuObjectInput[],
+): Promise<void> {
+  ensureTauriRuntime()
+  await invoke('qiniu_put_objects', { raw: raw(accessKey, secretKey), bucket, region, objects })
+}
+
 export async function deleteQiniuObject(
   accessKey: string,
   secretKey: string,
@@ -138,4 +155,15 @@ export async function deleteQiniuObject(
 ): Promise<void> {
   ensureTauriRuntime()
   await invoke('qiniu_delete_object', { raw: raw(accessKey, secretKey), bucket, region, key })
+}
+
+export async function deleteQiniuObjects(
+  accessKey: string,
+  secretKey: string,
+  bucket: string,
+  region: string,
+  keys: string[],
+): Promise<void> {
+  ensureTauriRuntime()
+  await invoke('qiniu_delete_objects', { raw: raw(accessKey, secretKey), bucket, region, keys })
 }

@@ -67,7 +67,9 @@ pub fn run() {
             qiniu::qiniu_get_attachment_data_url,
             qiniu::qiniu_sign_download_urls,
             qiniu::qiniu_put_object,
+            qiniu::qiniu_put_objects,
             qiniu::qiniu_delete_object,
+            qiniu::qiniu_delete_objects,
             get_window_work_area
         ])
         .setup(|_app| {

@@ -369,7 +369,7 @@ function App() {
     settings.dataSource === 'notion'
       ? createNotionDataSource(() => settingsRef.current)
       : settings.dataSource === 'qiniu'
-        ? createQiniuDataSource(() => settingsRef.current, () => entriesRef.current)
+        ? createQiniuDataSource(() => settingsRef.current)
         : createLocalDataSource()
   ), [settings.dataSource, settings.notionToken, notionTarget.databaseId, notionTarget.dataSourceId, settings.qiniuAccessKey, settings.qiniuSecretKey, settings.qiniuBucket, settings.qiniuRegion, settings.qiniuPrefix])
 

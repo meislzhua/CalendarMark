@@ -12,6 +12,7 @@ import {
   getQiniuObjects,
   listQiniuKeys,
   putQiniuObject,
+  putQiniuObjects,
   signQiniuDownloadUrls,
 } from './qiniu'
 import type { QiniuDayDocument, QiniuTagIndex } from './qiniu'
@@ -426,7 +427,6 @@ export async function syncQiniuTagIndexes(
 
 export function createQiniuDataSource(
   readSettings: () => AppSettings,
-  readEntries: () => CalendarEntry[],
 ): CalendarDataSource {
   function target(): QiniuTarget {
     const settings = readSettings()
@@ -449,7 +449,10 @@ export function createQiniuDataSource(
       attachment.qiniuKey ?? (entry.remote?.provider === 'qiniu' ? attachment.remoteId : undefined)
     )).filter((key): key is string => Boolean(key)))
     if (attachmentKeys.length === 0) return loaded
-    const sourceUrls = await signQiniuDownloadUrls(target().accessKey, target().secretKey, target().domain, attachmentKeys)
+    // 域名由 Rust 侧读取对象时自动发现；这里没有域名就不能让整月加载失败。
+    const sourceUrls = target().domain
+      ? await signQiniuDownloadUrls(target().accessKey, target().secretKey, target().domain, attachmentKeys)
+      : []
     const sourceUrlByKey = new Map(attachmentKeys.map((key, index) => [key, sourceUrls[index]]))
     const dataUrlCache = new Map<string, string>()
     const hydrated: CalendarEntry[] = []
@@ -496,7 +499,9 @@ export function createQiniuDataSource(
       const keys = Array.from({ length: daysInMonth }, (_, index) => (
         qiniuDayKey(target().prefix, `${monthKey}-${String(index + 1).padStart(2, '0')}`)
       ))
-      const documents = await readQiniuObjects(target(), keys)
+      const metaKey = `${target().prefix}/${QINIU_TAGS_META_KEY}`
+      const objectTexts = await readQiniuObjects(target(), [...keys, metaKey])
+      const documents = objectTexts.slice(0, keys.length)
       const dayDocuments: QiniuDayDocument[] = []
       documents.forEach((text) => {
         if (!text) return
@@ -509,7 +514,7 @@ export function createQiniuDataSource(
       })
 
       // 合并远端标签定义，保留本地已选颜色
-      const [metaText] = await readQiniuObjects(target(), [`${target().prefix}/${QINIU_TAGS_META_KEY}`])
+      const metaText = objectTexts[keys.length]
       let mergedTags = [...knownTags]
       if (metaText) {
         try {
@@ -560,19 +565,26 @@ export function createQiniuDataSource(
         attachment.qiniuKey ?? (entry.remote?.provider === 'qiniu' ? attachment.remoteId : undefined)
       ))
       const uploadedKeys = new Map<string, string>()
-      for (const attachment of pendingUploads) {
+      const pendingObjects = pendingUploads.map((attachment) => {
         const key = qiniuFileKey(currentTarget.prefix, attachment.id, attachment.name)
         const { mimeType, base64 } = parseDataUrl(attachment.dataUrl)
-        await putQiniuObject(
+        return {
+          key,
+          dataBase64: base64,
+          contentType: attachment.mimeType || mimeType,
+        }
+      })
+      if (pendingObjects.length > 0) {
+        await putQiniuObjects(
           currentTarget.accessKey,
           currentTarget.secretKey,
           currentTarget.bucket,
           currentTarget.region,
-          key,
-          base64,
-          attachment.mimeType || mimeType,
+          pendingObjects,
         )
-        uploadedKeys.set(attachment.id, key)
+      }
+      for (const attachment of pendingUploads) {
+        uploadedKeys.set(attachment.id, qiniuFileKey(currentTarget.prefix, attachment.id, attachment.name))
       }
       const savedEntry: CalendarEntry = {
         ...entry,
@@ -584,10 +596,12 @@ export function createQiniuDataSource(
         }),
       }
 
-      // 组装当天完整文档：以内存中的当天记录为准，避免读到旧版本
-      const dayEntries = readEntries()
-        .filter((item) => item.date === entry.date && item.id !== entry.id)
-        .concat(savedEntry)
+      // 以远端日期文档为基底，只覆盖当前保存的这条记录。
+      // 不能把前端内存里的“当前月列表”当成全天 authoritative 数据：
+      // 月份加载失败/部分加载时直接覆盖整个日期，会把远端已有记录冲掉。
+      const remoteDayEntries = mergeQiniuDayDocuments(existing ? [existing] : [], tags).entries
+        .filter((item) => item.id !== savedEntry.id)
+      const dayEntries = [...remoteDayEntries, savedEntry]
       const document = toQiniuDayDocument(entry.date, dayEntries, tags, currentTarget.prefix)
       await writeQiniuJson(currentTarget, qiniuDayKey(currentTarget.prefix, entry.date), document)
       const nameById = new Map(tags.map((tag) => [tag.id, tag.name]))
