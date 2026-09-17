@@ -37,7 +37,20 @@ export function loadTags(): Tag[] {
 }
 
 export function loadSettings(): AppSettings {
-  return { ...DEFAULT_SETTINGS, ...read(STORAGE_KEYS.settings, DEFAULT_SETTINGS) }
+  const stored = read<Partial<AppSettings>>(STORAGE_KEYS.settings, DEFAULT_SETTINGS)
+  const settings = { ...DEFAULT_SETTINGS, ...stored }
+  // 兼容旧版本：把单个 qiniuToken（AK:SK）迁移为分开的 AK / SK 字段
+  const legacyToken = (stored as { qiniuToken?: string }).qiniuToken
+  if (legacyToken && !settings.qiniuAccessKey) {
+    const separator = legacyToken.includes(':') ? ':' : /\s+/
+    const parts = legacyToken.trim().split(separator, 2)
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      settings.qiniuAccessKey = parts[0].trim()
+      settings.qiniuSecretKey = parts[1].trim()
+    }
+  }
+  delete (settings as { qiniuToken?: string }).qiniuToken
+  return settings
 }
 
 export function saveEntries(entries: CalendarEntry[]): void {

@@ -120,7 +120,8 @@ export type AppSettings = {
   notionDatabaseId: string
   notionDataSourceId: string
   notionDatasets: NotionDataset[]
-  qiniuToken: string
+  qiniuAccessKey: string
+  qiniuSecretKey: string
   qiniuBucket: string
   qiniuRegion: string
   qiniuDomain: string
@@ -152,7 +153,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   notionDatabaseId: '',
   notionDataSourceId: '',
   notionDatasets: [],
-  qiniuToken: '',
+  qiniuAccessKey: '',
+  qiniuSecretKey: '',
   qiniuBucket: '',
   qiniuRegion: 'z0',
   qiniuDomain: '',

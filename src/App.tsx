@@ -194,7 +194,9 @@ function getRemoteConfigError(settings: AppSettings): string | null {
     return null
   }
   if (settings.dataSource === 'qiniu') {
-    if (!settings.qiniuToken.trim() || !settings.qiniuBucket.trim()) return '请先在设置中配置七牛 AccessKey:SecretKey 并选择空间'
+    if (!settings.qiniuAccessKey.trim() || !settings.qiniuSecretKey.trim() || !settings.qiniuBucket.trim()) {
+      return '请先在设置中分别填写七牛 AccessKey / SecretKey 并选择空间'
+    }
     return null
   }
   return '当前数据源不可用'
@@ -306,7 +308,7 @@ function App() {
       : settings.dataSource === 'qiniu'
         ? createQiniuDataSource(() => settingsRef.current, () => entriesRef.current)
         : createLocalDataSource()
-  ), [settings.dataSource, settings.notionToken, notionTarget.databaseId, notionTarget.dataSourceId, settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion, settings.qiniuPrefix])
+  ), [settings.dataSource, settings.notionToken, notionTarget.databaseId, notionTarget.dataSourceId, settings.qiniuAccessKey, settings.qiniuSecretKey, settings.qiniuBucket, settings.qiniuRegion, settings.qiniuPrefix])
 
   const calendarCells = useMemo(() => getCalendarCells(currentMonth), [currentMonth])
   const monthTitle = new Intl.DateTimeFormat('zh-CN', {
@@ -467,14 +469,14 @@ function App() {
 
   // 七牛额度用量：配置好七牛数据源后，在左下角数据源入口上方常驻显示。
   useEffect(() => {
-    if (!settings.qiniuToken.trim() || !settings.qiniuBucket.trim()) {
+    if (!settings.qiniuAccessKey.trim() || !settings.qiniuSecretKey.trim() || !settings.qiniuBucket.trim()) {
       setQiniuUsage(null)
       setQiniuUsageState('idle')
       return undefined
     }
     let cancelled = false
     setQiniuUsageState('loading')
-    getQiniuUsage(settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion)
+    getQiniuUsage(settings.qiniuAccessKey, settings.qiniuSecretKey, settings.qiniuBucket, settings.qiniuRegion)
       .then((usage) => {
         if (cancelled) return
         setQiniuUsage(usage)
@@ -488,7 +490,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion, settings.dataSource])
+  }, [settings.qiniuAccessKey, settings.qiniuSecretKey, settings.qiniuBucket, settings.qiniuRegion, settings.dataSource])
 
   // 年月选择器：点击外部关闭
   useEffect(() => {
@@ -785,7 +787,7 @@ function App() {
         </div>
 
         <div className="sidebar-footer">
-          {settings.qiniuToken.trim() && settings.qiniuBucket.trim() && (
+          {settings.qiniuAccessKey.trim() && settings.qiniuSecretKey.trim() && settings.qiniuBucket.trim() && (
             <div className="qiniu-usage-card" role="status">
               <div className="qiniu-usage-heading">
                 <Cloud size={14} />
@@ -810,7 +812,7 @@ function App() {
                 onClick={() => {
                   if (qiniuUsageState === 'loading') return
                   setQiniuUsageState('loading')
-                  getQiniuUsage(settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion)
+                  getQiniuUsage(settings.qiniuAccessKey, settings.qiniuSecretKey, settings.qiniuBucket, settings.qiniuRegion)
                     .then((usage) => {
                       setQiniuUsage(usage)
                       setQiniuUsageState('ready')
@@ -1783,16 +1785,18 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
   const [usage, setUsage] = useState<QiniuUsage | null>(null)
   const [usageError, setUsageError] = useState('')
   const update = (partial: Partial<AppSettings>) => onChangeSettings((previous) => ({ ...previous, ...partial }))
-  const isConfigured = Boolean(settings.qiniuToken.trim() && settings.qiniuBucket.trim())
+  const accessKey = settings.qiniuAccessKey.trim()
+  const secretKey = settings.qiniuSecretKey.trim()
+  const isConfigured = Boolean(accessKey && secretKey && settings.qiniuBucket.trim())
 
   useEffect(() => {
     void listQiniuRegions().then(setRegions).catch(() => setRegions([]))
   }, [])
 
-  async function refreshUsage(token: string, bucket: string, region: string) {
+  async function refreshUsage(ak: string, sk: string, bucket: string, region: string) {
     setUsageError('')
     try {
-      setUsage(await getQiniuUsage(token, bucket, region))
+      setUsage(await getQiniuUsage(ak, sk, bucket, region))
     } catch (error) {
       setUsage(null)
       setUsageError(error instanceof Error ? error.message : String(error))
@@ -1804,23 +1808,27 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
       setUsage(null)
       return undefined
     }
-    void refreshUsage(settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion)
+    void refreshUsage(accessKey, secretKey, settings.qiniuBucket, settings.qiniuRegion)
     return undefined
-  }, [settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion, isConfigured])
+  }, [accessKey, secretKey, settings.qiniuBucket, settings.qiniuRegion, isConfigured])
 
   async function connectBuckets() {
-    if (!settings.qiniuToken.trim()) {
-      onNotice('请先填写七牛 AccessKey:SecretKey，格式：AK:SK')
+    if (!accessKey) {
+      onNotice('请先填写七牛 AccessKey（在七牛「个人中心 → 密钥管理」中复制）')
+      return
+    }
+    if (!secretKey) {
+      onNotice('请再填写 SecretKey（和 AccessKey 是同一对密钥，注意不要填反）')
       return
     }
     setBusy('connecting')
     try {
-      const list = await listQiniuBuckets(settings.qiniuToken)
+      const list = await listQiniuBuckets(accessKey, secretKey)
       setBuckets(list)
       const keepBucket = list.includes(settings.qiniuBucket.trim()) ? settings.qiniuBucket.trim() : ''
       let nextDomain = settings.qiniuDomain
       if (keepBucket) {
-        const domains = await listQiniuBucketDomains(settings.qiniuToken, keepBucket)
+        const domains = await listQiniuBucketDomains(accessKey, secretKey, keepBucket)
         nextDomain = domains[0] ?? nextDomain
       }
       update({ qiniuBucket: keepBucket, qiniuDomain: nextDomain })
@@ -1834,9 +1842,9 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
 
   async function selectBucket(bucket: string) {
     update({ qiniuBucket: bucket, qiniuDomain: '' })
-    if (!settings.qiniuToken.trim()) return
+    if (!accessKey || !secretKey) return
     try {
-      const domains = await listQiniuBucketDomains(settings.qiniuToken, bucket)
+      const domains = await listQiniuBucketDomains(accessKey, secretKey, bucket)
       update({ qiniuBucket: bucket, qiniuDomain: domains[0] ?? '' })
       if (!domains.length) onNotice('空间没有可用域名；附件下载需要空间绑定域名（新空间可能需要几分钟）')
     } catch (error) {
@@ -1845,8 +1853,8 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
   }
 
   async function handleCreateBucket() {
-    if (!settings.qiniuToken.trim()) {
-      onNotice('请先填写七牛 AccessKey:SecretKey，再创建空间')
+    if (!accessKey || !secretKey) {
+      onNotice('请先填写七牛 AccessKey 和 SecretKey，再创建空间')
       return
     }
     const bucket = newBucketName.trim().toLowerCase()
@@ -1856,10 +1864,10 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
     }
     setBusy('creating')
     try {
-      await createQiniuBucket(settings.qiniuToken, bucket, settings.qiniuRegion)
-      const list = await listQiniuBuckets(settings.qiniuToken)
+      await createQiniuBucket(accessKey, secretKey, bucket, settings.qiniuRegion)
+      const list = await listQiniuBuckets(accessKey, secretKey)
       setBuckets(list)
-      const domains = await listQiniuBucketDomains(settings.qiniuToken, bucket).catch(() => [])
+      const domains = await listQiniuBucketDomains(accessKey, secretKey, bucket).catch(() => [])
       update({ qiniuBucket: bucket, qiniuDomain: domains[0] ?? '' })
       onNotice(`已创建私有空间「${bucket}」并设为同步目标`)
       onReloadRemote?.()
@@ -1875,22 +1883,33 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
       <div className="qiniu-logo">Q</div>
       <div>
         <strong>七牛云 Kodo 连接</strong>
-        <span>在七牛「个人中心 → 密钥管理」复制 AccessKey / SecretKey，粘贴为 AK:SK</span>
+        <span>在七牛「个人中心 → 密钥管理」分别复制 AccessKey 和 SecretKey</span>
       </div>
       <span className="connection-badge"><span className={`status-dot ${isConfigured ? 'status-dot--ready' : ''}`} />{isConfigured ? '已连接' : '待配置'}</span>
     </div>
 
     <div className="source-fields">
       <label className="field-label">
-        <span>密钥 Token（AK:SK）</span>
+        <span>AccessKey</span>
         <span className="field-hint">七牛控制台 → 个人中心 → 密钥管理</span>
       </label>
       <input
         className="settings-input"
         type="password"
-        placeholder="AccessKey:SecretKey"
-        value={settings.qiniuToken}
-        onChange={(event) => update({ qiniuToken: event.target.value })}
+        placeholder="AccessKey"
+        value={settings.qiniuAccessKey}
+        onChange={(event) => update({ qiniuAccessKey: event.target.value })}
+      />
+      <label className="field-label">
+        <span>SecretKey</span>
+        <span className="field-hint">与 AccessKey 同一对密钥；请勿与 AccessKey 填反</span>
+      </label>
+      <input
+        className="settings-input"
+        type="password"
+        placeholder="SecretKey"
+        value={settings.qiniuSecretKey}
+        onChange={(event) => update({ qiniuSecretKey: event.target.value })}
       />
       <label className="field-label">
         <span>存储区域</span>
@@ -1961,7 +1980,7 @@ function QiniuSourceSettings({ settings, onChangeSettings, onNotice, onReloadRem
         <div className="qiniu-usage-heading">
           <Cloud size={15} />
           <strong>额度用量</strong>
-          <button type="button" className="text-button" onClick={() => { void refreshUsage(settings.qiniuToken, settings.qiniuBucket, settings.qiniuRegion) }}>刷新</button>
+          <button type="button" className="text-button" onClick={() => { void refreshUsage(accessKey, secretKey, settings.qiniuBucket, settings.qiniuRegion) }}>刷新</button>
         </div>
         {usage && (
           <>

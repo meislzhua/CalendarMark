@@ -38,9 +38,13 @@ function ensureTauriRuntime(): void {
   }
 }
 
-export async function listQiniuBuckets(token: string): Promise<string[]> {
+function raw(accessKey: string, secretKey: string) {
+  return { accessKey, secretKey }
+}
+
+export async function listQiniuBuckets(accessKey: string, secretKey: string): Promise<string[]> {
   ensureTauriRuntime()
-  return invoke<string[]>('qiniu_list_buckets', { token })
+  return invoke<string[]>('qiniu_list_buckets', { raw: raw(accessKey, secretKey) })
 }
 
 export async function listQiniuRegions(): Promise<QiniuRegionOption[]> {
@@ -48,39 +52,41 @@ export async function listQiniuRegions(): Promise<QiniuRegionOption[]> {
   return invoke<QiniuRegionOption[]>('qiniu_regions')
 }
 
-export async function createQiniuBucket(token: string, bucket: string, region: string): Promise<void> {
+export async function createQiniuBucket(accessKey: string, secretKey: string, bucket: string, region: string): Promise<void> {
   ensureTauriRuntime()
-  await invoke('qiniu_create_bucket', { token, bucket, region })
+  await invoke('qiniu_create_bucket', { raw: raw(accessKey, secretKey), bucket, region })
 }
 
-export async function listQiniuBucketDomains(token: string, bucket: string): Promise<string[]> {
+export async function listQiniuBucketDomains(accessKey: string, secretKey: string, bucket: string): Promise<string[]> {
   ensureTauriRuntime()
-  return invoke<string[]>('qiniu_bucket_domains', { token, bucket })
+  return invoke<string[]>('qiniu_bucket_domains', { raw: raw(accessKey, secretKey), bucket })
 }
 
-export async function getQiniuUsage(token: string, bucket: string, region: string): Promise<QiniuUsage> {
+export async function getQiniuUsage(accessKey: string, secretKey: string, bucket: string, region: string): Promise<QiniuUsage> {
   ensureTauriRuntime()
-  return invoke<QiniuUsage>('qiniu_get_usage', { token, bucket, region })
+  return invoke<QiniuUsage>('qiniu_get_usage', { raw: raw(accessKey, secretKey), bucket, region })
 }
 
-export async function listQiniuKeys(token: string, bucket: string, region: string, prefix: string): Promise<string[]> {
+export async function listQiniuKeys(accessKey: string, secretKey: string, bucket: string, region: string, prefix: string): Promise<string[]> {
   ensureTauriRuntime()
-  return invoke<string[]>('qiniu_list_keys', { token, bucket, region, prefix })
+  return invoke<string[]>('qiniu_list_keys', { raw: raw(accessKey, secretKey), bucket, region, prefix })
 }
 
 export async function getQiniuObjects(
-  token: string,
+  accessKey: string,
+  secretKey: string,
   bucket: string,
   region: string,
   domain: string,
   keys: string[],
 ): Promise<Array<string | null>> {
   ensureTauriRuntime()
-  return invoke<Array<string | null>>('qiniu_get_objects', { token, bucket, region, domain, keys })
+  return invoke<Array<string | null>>('qiniu_get_objects', { raw: raw(accessKey, secretKey), bucket, region, domain, keys })
 }
 
 export async function getQiniuAttachmentDataUrl(
-  token: string,
+  accessKey: string,
+  secretKey: string,
   bucket: string,
   region: string,
   domain: string,
@@ -88,20 +94,22 @@ export async function getQiniuAttachmentDataUrl(
   mimeType: string,
 ): Promise<string | null> {
   ensureTauriRuntime()
-  return invoke<string | null>('qiniu_get_attachment_data_url', { token, bucket, region, domain, key, mimeType })
+  return invoke<string | null>('qiniu_get_attachment_data_url', { raw: raw(accessKey, secretKey), bucket, region, domain, key, mimeType })
 }
 
 export async function signQiniuDownloadUrls(
-  token: string,
+  accessKey: string,
+  secretKey: string,
   domain: string,
   keys: string[],
 ): Promise<string[]> {
   ensureTauriRuntime()
-  return invoke<string[]>('qiniu_sign_download_urls', { token, domain, keys })
+  return invoke<string[]>('qiniu_sign_download_urls', { raw: raw(accessKey, secretKey), domain, keys })
 }
 
 export async function putQiniuObject(
-  token: string,
+  accessKey: string,
+  secretKey: string,
   bucket: string,
   region: string,
   key: string,
@@ -109,15 +117,16 @@ export async function putQiniuObject(
   contentType: string,
 ): Promise<void> {
   ensureTauriRuntime()
-  await invoke('qiniu_put_object', { token, bucket, region, key, dataBase64: dataBase64, contentType })
+  await invoke('qiniu_put_object', { raw: raw(accessKey, secretKey), bucket, region, key, dataBase64, contentType })
 }
 
 export async function deleteQiniuObject(
-  token: string,
+  accessKey: string,
+  secretKey: string,
   bucket: string,
   region: string,
   key: string,
 ): Promise<void> {
   ensureTauriRuntime()
-  await invoke('qiniu_delete_object', { token, bucket, region, key })
+  await invoke('qiniu_delete_object', { raw: raw(accessKey, secretKey), bucket, region, key })
 }

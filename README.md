@@ -19,7 +19,7 @@ CalendarMark 是一个基于 Tauri 2 的本地优先日历记录工具：用标�
 - **界面模式**：窗口模式为常规桌面窗口；抽屉模式（桌面端专属）切换为贴屏幕右侧的无边框窄边栏，带滑入动效，可在设置 → 界面中切换。
 - **可替换数据源**：设置页提供 Notion、本地存储和后续数据源的统一选择入口；Notion 是当前已实现的外部适配器。
 - **Notion 数据源**：选中 Notion 即远程直连，读取、保存和删除直接作用于远端；选中本地存储时，可在设置中对已配置的 Notion 数据集执行“拉取到本地 / 推送到 Notion”。
-- **七牛 Kodo 数据源**：填入七牛 AccessKey:SecretKey 即可远程直连私有对象存储空间；支持一键创建私有 `calendarmark` 空间、选择已有空间，侧栏左下角常驻显示七牛存储用量。
+- **七牛 Kodo 数据源**：分别填入七牛 AccessKey 和 SecretKey 即可远程直连私有对象存储空间；支持一键创建私有 `calendarmark` 空间、选择已有空间，侧栏左下角常驻显示七牛存储用量。
 - **本地优先**：MVP 使用 WebView 本地存储保存草稿，不依赖服务端即可使用。
 
 ## 技术栈
@@ -142,7 +142,7 @@ Android job 会安装 JDK 17、Android SDK platform/build-tools/NDK，并使用 
 
 在“设置 → 数据源”中选择七牛 Kodo：
 
-1. 在七牛控制台「个人中心 → 密钥管理」复制 AccessKey 和 SecretKey，回到 CalendarMark 按 `AccessKey:SecretKey` 粘贴到 Token 输入框。
+1. 在七牛控制台「个人中心 → 密钥管理」分别复制 AccessKey 和 SecretKey，粘贴到 CalendarMark 的两个输入框（注意两者不要填反）。
 2. 选择存储区域后点击“连接并获取空间”，账号下的空间会列出；点击任意空间即可设为同步目标。
 3. 还没有专用空间时，点击“创建私有空间”一键创建（默认名 `calendarmark`）：CalendarMark 会先创建空间再立即调用设置私有接口，确保所有内容仅授权用户可读。
 4. 存储目录前缀默认 `calendarmark`，可与其他应用共用同一个空间。

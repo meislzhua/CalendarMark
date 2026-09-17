@@ -160,12 +160,12 @@ type Attachment = {
 DataSourceDefinition[]
 ├── Notion          active   → Token / 数据集发现与选择 / 同步操作
 ├── 本地存储         active   → 无需配置
-├── 七牛 Kodo        active   → AK:SK / 区域 / 空间选择与一键私有创建
+├── 七牛 Kodo        active   → AccessKey + SecretKey / 区域 / 空间选择与一键私有创建
 ├── WebDAV           planned
 └── Obsidian Vault   planned
 ```
 
-`AppSettings.dataSource` 只保存当前选择。Notion 专属字段保存 `notionToken`、当前选中的 `notionDatabaseId` / `notionDataSourceId`，以及可切换的 `notionDatasets` 本地列表；七牛专属字段保存 `qiniuToken`（AK:SK）、`qiniuBucket`、`qiniuRegion`、`qiniuDomain`（空间域名缓存，用于生成签名下载链接）和 `qiniuPrefix`。
+`AppSettings.dataSource` 只保存当前选择。Notion 专属字段保存 `notionToken`、当前选中的 `notionDatabaseId` / `notionDataSourceId`，以及可切换的 `notionDatasets` 本地列表；七牛专属字段保存分开的 `qiniuAccessKey` / `qiniuSecretKey`、`qiniuBucket`、`qiniuRegion`、`qiniuDomain`（空间域名缓存，用于生成签名下载链接）和 `qiniuPrefix`（旧版本的单个 `qiniuToken` 会在读取设置时自动迁移为 AK/SK 两个字段）。
 
 数据源运行语义如下：
 

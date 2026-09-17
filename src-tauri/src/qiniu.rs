@@ -3,7 +3,7 @@ use base64::Engine as _;
 use futures::future::join_all;
 use hmac::{Hmac, Mac};
 use reqwest::{multipart, Client, Method, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha1::Sha1;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -78,10 +78,37 @@ pub struct QiniuRegionOption {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QiniuRawCredential {
+    pub access_key: String,
+    pub secret_key: String,
+}
+
 #[derive(Debug, Clone)]
 struct QiniuCredential {
     access_key: String,
     secret_key: String,
+}
+
+impl QiniuCredential {
+    fn from_pair(access_key: &str, secret_key: &str) -> Result<Self, String> {
+        let access_key = access_key.trim();
+        let secret_key = secret_key.trim();
+        if access_key.is_empty() || secret_key.is_empty() {
+            return Err("请完整填写七牛 AccessKey 和 SecretKey。".to_string());
+        }
+        if !valid_key(access_key) {
+            return Err("AccessKey 格式不正确：请复制个人中心「密钥管理」中的 AccessKey。".to_string());
+        }
+        if !valid_key(secret_key) {
+            return Err("SecretKey 格式不正确：请复制个人中心「密钥管理」中的 SecretKey。".to_string());
+        }
+        Ok(Self {
+            access_key: access_key.to_string(),
+            secret_key: secret_key.to_string(),
+        })
+    }
 }
 
 fn valid_key(value: &str) -> bool {
@@ -91,33 +118,8 @@ fn valid_key(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// 解析七牛凭据。七牛标准凭据是 `AccessKey:SecretKey`，
-/// 也兼容用空白分隔粘贴的 `AccessKey SecretKey`。
-fn parse_credential(token: &str) -> Result<QiniuCredential, String> {
-    let trimmed = token.trim();
-    if trimmed.is_empty() {
-        return Err("请先填写七牛 AccessKey:SecretKey。".to_string());
-    }
-    let (access_key, secret_key) = if let Some((first, rest)) = trimmed.split_once(':') {
-        (first.to_string(), rest.to_string())
-    } else {
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        match parts.as_slice() {
-            [first, rest, ..] if !rest.is_empty() => (first.to_string(), rest.to_string()),
-            _ => (trimmed.to_string(), String::new()),
-        }
-    };
-    let secret_key = secret_key.trim().to_string();
-    if !valid_key(&access_key) || !valid_key(&secret_key) {
-        return Err(
-            "七牛凭据格式不正确：请粘贴个人中心「密钥管理」中的 AccessKey:SecretKey（用冒号或空格分隔）。"
-                .to_string(),
-        );
-    }
-    Ok(QiniuCredential {
-        access_key,
-        secret_key,
-    })
+fn parse_credential(raw: &QiniuRawCredential) -> Result<QiniuCredential, String> {
+    QiniuCredential::from_pair(&raw.access_key, &raw.secret_key)
 }
 
 fn hmac_sha1_urlsafe(secret_key: &str, data: &str) -> String {
@@ -141,9 +143,18 @@ fn build_management_signing_string(
         signing.push_str("\nContent-Type: ");
         signing.push_str(content_type);
     }
+    // 官方 Go SDK collectDataV2：每个头信息行后带 \n，最后再补一个空行；
+    // body 仅在 Content-Type 为 form/json 且非空时参与签名。
+    // 官方文档与官方 Go SDK（collectDataV2）一致的格式：
+    // Host/Content-Type 各占一行（行尾 \n），最后再补一个空行。
     signing.push_str("\n\n");
     if let Some(body) = body {
-        if content_type != Some("application/octet-stream") && !body.is_empty() {
+        // body 仅在 form/json 且非空时参与签名（与官方 SDK incBodyV2 一致）
+        let includes_body = matches!(
+            content_type,
+            Some("application/x-www-form-urlencoded") | Some("application/json")
+        ) && !body.is_empty();
+        if includes_body {
             signing.push_str(body);
         }
     }
@@ -325,7 +336,9 @@ fn format_qiniu_error(context: &str, status: StatusCode, body: &str) -> String {
         })
         .unwrap_or_else(|| body.trim().to_string());
     match status.as_u16() {
-        401 => format!("{context}：七牛返回 401，请检查 AccessKey/SecretKey 是否正确。"),
+        401 => format!(
+            "{context}：七牛返回 401，AccessKey/SecretKey 不正确。请到七牛控制台「个人中心 → 密钥管理」重新复制（AK/SK 是一对密钥，不是账号密码），并确认两者没有填反。"
+        ),
         403 => format!("{context}：七牛返回 403，当前密钥没有对应权限（或账号欠费）。"),
         614 => format!("{context}：同名空间已存在，可直接选择该空间。"),
         631 => format!("{context}：空间不存在，请确认空间名称和区域。"),
@@ -334,8 +347,8 @@ fn format_qiniu_error(context: &str, status: StatusCode, body: &str) -> String {
 }
 
 #[tauri::command]
-pub async fn qiniu_list_buckets(token: String) -> Result<Vec<String>, String> {
-    let credential = parse_credential(&token)?;
+pub async fn qiniu_list_buckets(raw: QiniuRawCredential) -> Result<Vec<String>, String> {
+    let credential = parse_credential(&raw)?;
     let client = qiniu_client()?;
     let (status, body) = management_request(
         &client,
@@ -366,11 +379,11 @@ pub async fn qiniu_regions() -> Result<Vec<QiniuRegionOption>, String> {
 
 #[tauri::command]
 pub async fn qiniu_create_bucket(
-    token: String,
+    raw: QiniuRawCredential,
     bucket: String,
     region: String,
 ) -> Result<(), String> {
-    let credential = parse_credential(&token)?;
+    let credential = parse_credential(&raw)?;
     let bucket = bucket.trim().to_string();
     validate_bucket_name(&bucket)?;
     let region = if region.trim().is_empty() {
@@ -415,8 +428,8 @@ pub async fn qiniu_create_bucket(
 }
 
 #[tauri::command]
-pub async fn qiniu_bucket_domains(token: String, bucket: String) -> Result<Vec<String>, String> {
-    let credential = parse_credential(&token)?;
+pub async fn qiniu_bucket_domains(raw: QiniuRawCredential, bucket: String) -> Result<Vec<String>, String> {
+    let credential = parse_credential(&raw)?;
     let client = qiniu_client()?;
     let query = format!("/v2/domains?tbl={}", url_encode_component(bucket.trim()));
     let (status, body) = management_request(&client, &credential, UC_HOST, Method::GET, &query, None)
@@ -479,11 +492,11 @@ fn format_stats_time(timestamp: u64) -> String {
 
 #[tauri::command]
 pub async fn qiniu_get_usage(
-    token: String,
+    raw: QiniuRawCredential,
     bucket: String,
     region: String,
 ) -> Result<QiniuUsage, String> {
-    let credential = parse_credential(&token)?;
+    let credential = parse_credential(&raw)?;
     let bucket = bucket.trim().to_string();
     if bucket.is_empty() {
         return Err("请先选择七牛空间。".to_string());
@@ -586,12 +599,12 @@ async fn list_object_keys(
 
 #[tauri::command]
 pub async fn qiniu_list_keys(
-    token: String,
+    raw: QiniuRawCredential,
     bucket: String,
     region: String,
     prefix: String,
 ) -> Result<Vec<String>, String> {
-    let credential = parse_credential(&token)?;
+    let credential = parse_credential(&raw)?;
     let client = qiniu_client()?;
     list_object_keys(&client, &credential, bucket.trim(), region.trim(), &prefix).await
 }
@@ -629,13 +642,13 @@ async fn fetch_object_bytes(
 
 #[tauri::command]
 pub async fn qiniu_get_object(
-    token: String,
+    raw: QiniuRawCredential,
     bucket: String,
     region: String,
     domain: String,
     key: String,
 ) -> Result<Option<String>, String> {
-    let credential = parse_credential(&token)?;
+    let credential = parse_credential(&raw)?;
     let _ = region;
     let client = qiniu_client()?;
     let domain = if domain.trim().is_empty() {
@@ -668,14 +681,14 @@ async fn qiniu_bucket_domains_inner(
 
 #[tauri::command]
 pub async fn qiniu_get_attachment_data_url(
-    token: String,
+    raw: QiniuRawCredential,
     bucket: String,
     region: String,
     domain: String,
     key: String,
     mime_type: String,
 ) -> Result<Option<String>, String> {
-    let credential = parse_credential(&token)?;
+    let credential = parse_credential(&raw)?;
     let _ = region;
     let client = qiniu_client()?;
     let domain = if domain.trim().is_empty() {
@@ -699,11 +712,11 @@ pub async fn qiniu_get_attachment_data_url(
 
 #[tauri::command]
 pub async fn qiniu_sign_download_urls(
-    token: String,
+    raw: QiniuRawCredential,
     domain: String,
     keys: Vec<String>,
 ) -> Result<Vec<String>, String> {
-    let credential = parse_credential(&token)?;
+    let credential = parse_credential(&raw)?;
     if domain.trim().is_empty() {
         return Err("空间还没有可用域名，无法生成下载链接。".to_string());
     }
@@ -715,14 +728,14 @@ pub async fn qiniu_sign_download_urls(
 
 #[tauri::command]
 pub async fn qiniu_put_object(
-    token: String,
+    raw: QiniuRawCredential,
     bucket: String,
     region: String,
     key: String,
     data_base64: String,
     content_type: String,
 ) -> Result<(), String> {
-    let credential = parse_credential(&token)?;
+    let credential = parse_credential(&raw)?;
     let data = BASE64
         .decode(data_base64.trim())
         .map_err(|error| format!("附件数据无法解码：{error}"))?;
@@ -769,12 +782,12 @@ pub async fn qiniu_put_object(
 
 #[tauri::command]
 pub async fn qiniu_delete_object(
-    token: String,
+    raw: QiniuRawCredential,
     bucket: String,
     region: String,
     key: String,
 ) -> Result<(), String> {
-    let credential = parse_credential(&token)?;
+    let credential = parse_credential(&raw)?;
     let (_, _, _, rs_host, _) = region_config(&region);
     let path = format!("/delete/{}", encoded_entry(bucket.trim(), &key));
     let client = qiniu_client()?;
@@ -797,13 +810,13 @@ pub async fn qiniu_delete_object(
 /// 并发读取一组小 JSON 对象（日期文档/标签索引），不存在的键返回 None。
 #[tauri::command]
 pub async fn qiniu_get_objects(
-    token: String,
+    raw: QiniuRawCredential,
     bucket: String,
     region: String,
     domain: String,
     keys: Vec<String>,
 ) -> Result<Vec<Option<String>>, String> {
-    let credential = parse_credential(&token)?;
+    let credential = parse_credential(&raw)?;
     let _ = region;
     let client = qiniu_client()?;
     let domain = if domain.trim().is_empty() {
@@ -834,24 +847,36 @@ pub async fn qiniu_get_objects(
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_colon_separated_credential() {
-        let credential = parse_credential("AKTEST0000000000000000000000000000000000:SKTEST0000000000000000000000000000000000000").unwrap();
-        assert_eq!(credential.access_key, "AKTEST0000000000000000000000000000000000");
-        assert_eq!(credential.secret_key, "SKTEST0000000000000000000000000000000000000");
+    fn test_raw() -> QiniuRawCredential {
+        QiniuRawCredential {
+            access_key: "AKTEST0000000000000000000000000000000000".to_string(),
+            secret_key: "SKTEST0000000000000000000000000000000000000".to_string(),
+        }
     }
 
     #[test]
-    fn parses_space_separated_credential() {
-        let credential = parse_credential("  AKTEST0000000000000000000000000000000000\nSKTEST0000000000000000000000000000000000000  ").unwrap();
+    fn parses_paired_credential_with_trimming() {
+        let mut raw = test_raw();
+        raw.access_key = format!(" {} ", raw.access_key);
+        raw.secret_key = format!("\n{}\n", raw.secret_key);
+        let credential = parse_credential(&raw).unwrap();
         assert_eq!(credential.access_key, "AKTEST0000000000000000000000000000000000");
         assert_eq!(credential.secret_key, "SKTEST0000000000000000000000000000000000000");
     }
 
     #[test]
     fn rejects_incomplete_credential() {
-        assert!(parse_credential("").is_err());
-        assert!(parse_credential("only-access-key").is_err());
+        let mut raw = test_raw();
+        raw.secret_key = String::new();
+        let error = parse_credential(&raw).unwrap_err();
+        assert!(error.contains("完整填写"));
+    }
+
+    #[test]
+    fn rejects_malformed_credential() {
+        let mut raw = test_raw();
+        raw.access_key = "not a valid access key".to_string();
+        assert!(parse_credential(&raw).is_err());
     }
 
     #[test]

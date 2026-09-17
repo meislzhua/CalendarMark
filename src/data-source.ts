@@ -225,7 +225,8 @@ export function createNotionDataSource(
 }
 
 type QiniuTarget = {
-  token: string
+  accessKey: string
+  secretKey: string
   bucket: string
   region: string
   domain: string
@@ -340,7 +341,7 @@ export function mergeQiniuDayDocuments(
 
 async function readQiniuObjects(target: QiniuTarget, keys: string[]): Promise<Array<string | null>> {
   if (keys.length === 0) return []
-  return getQiniuObjects(target.token, target.bucket, target.region, target.domain, keys)
+  return getQiniuObjects(target.accessKey, target.secretKey, target.bucket, target.region, target.domain, keys)
 }
 
 async function readQiniuDayDocument(target: QiniuTarget, date: string): Promise<QiniuDayDocument | null> {
@@ -356,7 +357,7 @@ async function readQiniuDayDocument(target: QiniuTarget, date: string): Promise<
 
 async function writeQiniuJson(target: QiniuTarget, key: string, value: unknown): Promise<void> {
   const text = JSON.stringify(value, null, 2)
-  await putQiniuObject(target.token, target.bucket, target.region, key, utf8ToBase64(text), 'application/json')
+  await putQiniuObject(target.accessKey, target.secretKey, target.bucket, target.region, key, utf8ToBase64(text), 'application/json')
 }
 
 async function syncQiniuTagIndexes(
@@ -378,7 +379,7 @@ async function syncQiniuTagIndexes(
     const key = qiniuTagIndexKey(target.prefix, tagName, date)
     const entryIds = grouped.get(tagName) ?? []
     if (entryIds.length === 0) {
-      await deleteQiniuObject(target.token, target.bucket, target.region, key)
+      await deleteQiniuObject(target.accessKey, target.secretKey, target.bucket, target.region, key)
       continue
     }
     const owningEntry = dayEntryTags.find((item) => item.tagNames.includes(tagName))
@@ -398,11 +399,12 @@ export function createQiniuDataSource(
   function target(): QiniuTarget {
     const settings = readSettings()
     const prefix = settings.qiniuPrefix.trim().replace(/^\/+|\/+$/g, '') || 'calendarmark'
-    if (!settings.qiniuToken.trim() || !settings.qiniuBucket.trim()) {
-      throw new Error('请先在设置中配置七牛 AccessKey:SecretKey 并选择空间')
+    if (!settings.qiniuAccessKey.trim() || !settings.qiniuSecretKey.trim() || !settings.qiniuBucket.trim()) {
+      throw new Error('请先在设置中配置七牛 AccessKey / SecretKey 并选择空间')
     }
     return {
-      token: settings.qiniuToken,
+      accessKey: settings.qiniuAccessKey,
+      secretKey: settings.qiniuSecretKey,
       bucket: settings.qiniuBucket.trim(),
       region: settings.qiniuRegion.trim() || 'z0',
       domain: settings.qiniuDomain.trim(),
@@ -413,7 +415,7 @@ export function createQiniuDataSource(
   async function hydrateAttachments(loaded: CalendarEntry[]): Promise<CalendarEntry[]> {
     const attachmentKeys = loaded.flatMap((entry) => entry.attachments.map((a) => a.remoteId).filter((key): key is string => Boolean(key)))
     if (attachmentKeys.length === 0) return loaded
-    const sourceUrls = await signQiniuDownloadUrls(target().token, target().domain, attachmentKeys)
+    const sourceUrls = await signQiniuDownloadUrls(target().accessKey, target().secretKey, target().domain, attachmentKeys)
     const sourceUrlByKey = new Map(attachmentKeys.map((key, index) => [key, sourceUrls[index]]))
     const dataUrlCache = new Map<string, string>()
     const hydrated: CalendarEntry[] = []
@@ -427,7 +429,7 @@ export function createQiniuDataSource(
           if (!dataUrlCache.has(key)) {
             try {
               const fetched = await getQiniuAttachmentDataUrl(
-                target().token, target().bucket, target().region, target().domain, key, attachment.mimeType,
+                target().accessKey, target().secretKey, target().bucket, target().region, target().domain, key, attachment.mimeType,
               )
               dataUrlCache.set(key, fetched ?? '')
             } catch {
@@ -494,7 +496,7 @@ export function createQiniuDataSource(
 
     async queryTagDates(tagName) {
       const prefix = `${target().prefix}/tags/${encodeURIComponent(tagName)}/`
-      const keys = await listQiniuKeys(target().token, target().bucket, target().region, prefix)
+      const keys = await listQiniuKeys(target().accessKey, target().secretKey, target().bucket, target().region, prefix)
       const indexKeys = keys.filter((key) => key.endsWith('.json')).sort((a, b) => b.localeCompare(a)).slice(0, 30)
       const texts = await readQiniuObjects(target(), indexKeys)
       const summaries: TagDateSummary[] = []
@@ -526,7 +528,8 @@ export function createQiniuDataSource(
         const key = qiniuFileKey(currentTarget.prefix, attachment.id, attachment.name)
         const { mimeType, base64 } = parseDataUrl(attachment.dataUrl)
         await putQiniuObject(
-          currentTarget.token,
+          currentTarget.accessKey,
+          currentTarget.secretKey,
           currentTarget.bucket,
           currentTarget.region,
           key,
@@ -568,7 +571,7 @@ export function createQiniuDataSource(
       const sourceUrlByKey = new Map<string, string>()
       const keysForUrls = savedEntry.attachments.map((a) => a.remoteId).filter((key): key is string => Boolean(key))
       if (keysForUrls.length > 0) {
-        const urls = await signQiniuDownloadUrls(currentTarget.token, currentTarget.domain, keysForUrls)
+        const urls = await signQiniuDownloadUrls(currentTarget.accessKey, currentTarget.secretKey, currentTarget.domain, keysForUrls)
         keysForUrls.forEach((key, index) => sourceUrlByKey.set(key, urls[index]))
       }
       return {
@@ -599,13 +602,13 @@ export function createQiniuDataSource(
       if (removed) {
         for (const attachment of removed.attachments) {
           if (!keptKeys.has(attachment.key)) {
-            await deleteQiniuObject(currentTarget.token, currentTarget.bucket, currentTarget.region, attachment.key)
+            await deleteQiniuObject(currentTarget.accessKey, currentTarget.secretKey, currentTarget.bucket, currentTarget.region, attachment.key)
           }
         }
       }
 
       if (remaining.length === 0) {
-        await deleteQiniuObject(currentTarget.token, currentTarget.bucket, currentTarget.region, qiniuDayKey(currentTarget.prefix, entry.date))
+        await deleteQiniuObject(currentTarget.accessKey, currentTarget.secretKey, currentTarget.bucket, currentTarget.region, qiniuDayKey(currentTarget.prefix, entry.date))
       } else {
         await writeQiniuJson(currentTarget, qiniuDayKey(currentTarget.prefix, entry.date), { date: entry.date, entries: remaining })
       }
