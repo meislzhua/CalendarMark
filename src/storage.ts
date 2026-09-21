@@ -5,6 +5,7 @@ import {
   oneEntryPerDate,
 } from './types'
 import type { AppSettings, CalendarEntry, Tag } from './types'
+import { isAndroidTauriRuntime } from './tauri'
 
 const STORAGE_KEYS = {
   entries: 'calendarmark.entries.v1',
@@ -29,6 +30,23 @@ function write<T>(key: string, value: T): void {
   }
 }
 
+/**
+ * 启动自检：WebView 的 localStorage 在异常环境下可能不可写（隐私模式/配额/配置损坏），
+ * 此时设置会静默丢失，表现为“明明配置过，重开又变成待配置”。
+ * 与其吞掉错误，不如显式暴露给 UI。
+ */
+export function checkStorageAvailable(): boolean {
+  try {
+    const probeKey = 'calendarmark.storage-probe.v1'
+    window.localStorage.setItem(probeKey, '1')
+    const readable = window.localStorage.getItem(probeKey) === '1'
+    window.localStorage.removeItem(probeKey)
+    return readable
+  } catch {
+    return false
+  }
+}
+
 export function loadEntries(): CalendarEntry[] {
   return oneEntryPerDate(read(STORAGE_KEYS.entries, getSeedEntries()))
 }
@@ -40,6 +58,9 @@ export function loadTags(): Tag[] {
 export function loadSettings(): AppSettings {
   const stored = read<Partial<AppSettings>>(STORAGE_KEYS.settings, DEFAULT_SETTINGS)
   const settings = { ...DEFAULT_SETTINGS, ...stored }
+  // Android 使用单列堆叠布局：界面模式选择在移动端隐藏，
+  // 因此安卓端固定按抽屉（单列）模式渲染，避免沿用桌面默认的窗口双栏。
+  if (isAndroidTauriRuntime()) settings.uiMode = 'drawer'
   // 兼容旧版本：把单个 qiniuToken（AK:SK）迁移为分开的 AK / SK 字段
   const legacyToken = (stored as { qiniuToken?: string }).qiniuToken
   if (legacyToken && !settings.qiniuAccessKey) {

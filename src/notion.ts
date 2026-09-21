@@ -132,6 +132,59 @@ export type NotionPushResult = {
   warnings: string[]
 }
 
+export type NotionSettingsMappingInfo = {
+  ready: boolean
+  nameProperty?: string
+  dataProperty?: string
+  colorProperty?: string
+  colorPropertyType?: string
+  retiredProperty?: string
+  idProperty?: string
+  message?: string
+}
+
+export type NotionSettingsConnectionInfo = {
+  databaseId: string
+  databaseTitle: string
+  dataSourceId: string
+  dataSourceName: string
+  properties: NotionPropertyInfo[]
+  mapping: NotionSettingsMappingInfo
+}
+
+export type NotionTagRecord = {
+  remoteId: string
+  tagId?: string
+  name: string
+  color?: string
+  retired: boolean
+  updatedAt: string
+}
+
+export type NotionSettingsPullResult = {
+  connection: NotionSettingsConnectionInfo
+  tags: NotionTagRecord[]
+  warnings: string[]
+}
+
+export type NotionTagInput = {
+  id: string
+  name: string
+  color?: string
+  retired?: boolean
+}
+
+export type NotionSettingsPushResult = {
+  connection: NotionSettingsConnectionInfo
+  tags: NotionTagRecord[]
+  warnings: string[]
+}
+
+export type NotionTokenTestResult = {
+  botName?: string
+  workspaceName?: string
+}
+
 function ensureTauriRuntime(): void {
   if (!isTauriRuntime()) {
     throw new Error('请在 Tauri 桌面版或 Android 版中使用 Notion 同步')
@@ -191,6 +244,39 @@ export async function archiveNotionPage(token: string, pageId: string): Promise<
   await invoke('notion_archive_page', { token, pageId })
 }
 
+export async function testNotionToken(token: string): Promise<NotionTokenTestResult> {
+  ensureTauriRuntime()
+  return invoke<NotionTokenTestResult>('notion_test_token', { token })
+}
+
+export async function testNotionDataset(
+  token: string,
+  databaseId: string,
+  dataSourceId?: string,
+): Promise<NotionConnectionInfo> {
+  ensureTauriRuntime()
+  return invoke<NotionConnectionInfo>('notion_test_dataset', {
+    token,
+    databaseId,
+    dataSourceId: dataSourceId || null,
+  })
+}
+
+export async function archiveNotionPagesByDate(
+  token: string,
+  databaseId: string,
+  date: string,
+  dataSourceId?: string,
+): Promise<number> {
+  ensureTauriRuntime()
+  return invoke<number>('notion_archive_pages_by_date', {
+    token,
+    databaseId,
+    date,
+    dataSourceId: dataSourceId || null,
+  })
+}
+
 export async function searchNotionPages(token: string): Promise<NotionPageSearchResult> {
   ensureTauriRuntime()
   return invoke<NotionPageSearchResult>('notion_search_pages', { token })
@@ -203,6 +289,60 @@ export async function createNotionDatabase(
 ): Promise<NotionConnectionInfo> {
   ensureTauriRuntime()
   return invoke<NotionConnectionInfo>('notion_create_database', {
+    token,
+    parentPageId,
+    title,
+  })
+}
+
+export async function checkNotionSettingsConnection(
+  token: string,
+  databaseId: string,
+  dataSourceId?: string,
+): Promise<NotionSettingsConnectionInfo> {
+  ensureTauriRuntime()
+  return invoke<NotionSettingsConnectionInfo>('notion_check_settings_connection', {
+    token,
+    databaseId,
+    dataSourceId: dataSourceId || null,
+  })
+}
+
+export async function pullNotionSettings(
+  token: string,
+  databaseId: string,
+  dataSourceId?: string,
+): Promise<NotionSettingsPullResult> {
+  ensureTauriRuntime()
+  return invoke<NotionSettingsPullResult>('notion_pull_settings', {
+    token,
+    databaseId,
+    dataSourceId: dataSourceId || null,
+  })
+}
+
+export async function pushNotionSettings(
+  token: string,
+  databaseId: string,
+  dataSourceId: string | undefined,
+  tags: NotionTagInput[],
+): Promise<NotionSettingsPushResult> {
+  ensureTauriRuntime()
+  return invoke<NotionSettingsPushResult>('notion_push_settings', {
+    token,
+    databaseId,
+    dataSourceId: dataSourceId || null,
+    tags,
+  })
+}
+
+export async function createNotionSettingsDatabase(
+  token: string,
+  parentPageId: string,
+  title: string,
+): Promise<NotionSettingsConnectionInfo> {
+  ensureTauriRuntime()
+  return invoke<NotionSettingsConnectionInfo>('notion_create_settings_database', {
     token,
     parentPageId,
     title,

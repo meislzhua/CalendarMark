@@ -43,12 +43,13 @@ Notion 已由 `src-tauri/src/notion.rs` 通过 Rust HTTP client 接入，React �
 - 不在 React 前端直接调用 Notion API。
 - 不把 Integration Token 写入日志、错误 toast 或 GitHub Actions 输出；请求错误只返回 HTTP 状态和 Notion message。
 - 当前 Token 为了 MVP 体验保存在 WebView localStorage，正式发布前应迁移到 Tauri Store 的安全后端或系统 Keychain。
-- 点击“发现数据集”时使用 `POST /search` 的 `object=data_source` 过滤器和游标分页，列出当前 Token 可访问的数据源；用户添加的数据集保存在 `AppSettings.notionDatasets`，可以保存多个并切换。
-- “新建数据库”先通过 `POST /search` 的 `object=page` 列出可作为父级的页面，再用 `POST /databases` 创建标准属性结构；Notion API 不允许在 workspace 根级创建数据库，父级页面是硬性要求。
+- 点击“发现数据集”时使用 `POST /search` 的 `object=data_source` 过滤器和游标分页，列出当前 Token 可访问的数据源；用户添加的数据集保存在 `AppSettings.notionDatasets`，并分别绑定到 `notionDatabaseId`（日期数据库）和 `notionSettingsDatabaseId`（设置数据库）。
+- “新建数据库”先通过 `POST /search` 的 `object=page` 列出可作为父级的页面，再用 `POST /databases` 创建标准属性结构（日期库：名称/日期/内容/标签/附件；设置库：名称/颜色/停用/ID）；Notion API 不允许在 workspace 根级创建数据库，父级页面是硬性要求。
 - 选定数据集后调用 Retrieve a database / Retrieve a data source 读取 schema；数据库包含多个 data source 时仍可从连接结果切换。旧版本只保存 Database ID 的设置仍可兼容读取，并会在成功连接后迁移到数据集列表。
 - 字段映射按属性类型优先、按中文/英文名称辅助识别：`title` + `date` 为必需，`rich_text` / `multi_select` / `files` 为可选。
 - 查询使用 cursor 分页；429 和 5xx 最多做三次短退避重试。
-- 写入时根据本地 `remote.id` 选择创建或更新页面；附件优先复用已有的 file upload ID / external 引用，只有新附件才创建 File Upload 并通过 multipart 上传。推送结果会回传每个附件的稳定引用，前端在 `applyPushResultToEntry` 中按索引合并保存，后续编辑不再重复上传。
+- 写入时先按日期查询日期数据库：该日期已有页面就更新那一条（优先本地 `remote.id`，其次是最近编辑的页面），没有才创建；同日期多余页面归档，保证“一天一条”。附件优先复用已有的 file upload ID / external 引用，只有新附件才创建 File Upload 并通过 multipart 上传。推送结果会回传每个附件的稳定引用，前端按索引合并保存，后续编辑不再重复上传。
+- 标签定义保存在设置数据库的一条「CalendarMark 标签」记录里（title 属性做标题、rich_text 属性存 JSON）：`notion_pull_settings` 按标题过滤只读这一条，`notion_push_settings` 只创建/更新这一条，绝不归档设置库中的其他页面。旧版“每个标签一行”的数据在首次读取时迁移一次，旧页面保持不变。
 - `AppSettings.dataSource=notion` 是远程直连模式：App 在启动、切换数据集或点击“重新读取”时调用查询命令，保存和删除直接调用 Notion；自动读取带 500ms 防抖，避免逐字符输入 Token 时重复请求。
 - `AppSettings.dataSource=local` 才显示显式“拉取到本地 / 推送到 Notion”按钮；两种模式都不做后台自动覆盖，冲突和可选字段缺失通过同步警告反馈给用户。
 

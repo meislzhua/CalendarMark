@@ -21,9 +21,7 @@ struct WindowWorkArea {
 }
 
 #[tauri::command]
-fn get_window_work_area(
-    window: tauri::WebviewWindow,
-) -> Result<WindowWorkArea, String> {
+fn get_window_work_area(window: tauri::WebviewWindow) -> Result<WindowWorkArea, String> {
     let monitor = window
         .current_monitor()
         .map_err(|error| format!("无法读取当前显示器：{error}"))?
@@ -53,11 +51,18 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             notion::notion_discover_datasets,
             notion::notion_check_connection,
+            notion::notion_test_token,
+            notion::notion_test_dataset,
             notion::notion_pull_entries,
             notion::notion_push_entries,
             notion::notion_archive_page,
+            notion::notion_archive_pages_by_date,
             notion::notion_search_pages,
             notion::notion_create_database,
+            notion::notion_check_settings_connection,
+            notion::notion_pull_settings,
+            notion::notion_push_settings,
+            notion::notion_create_settings_database,
             get_window_work_area
         ])
         .setup(|_app| {
@@ -112,5 +117,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running CalendarMark");
 }
-
-

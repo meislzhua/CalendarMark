@@ -1,11 +1,13 @@
 import type { AppSettings, CalendarEntry, EntryRemoteRef, Tag } from './types'
 import { createId, oneEntryPerDate, toDateKey, TAG_COLORS } from './types'
 import {
-  archiveNotionPage,
+  archiveNotionPagesByDate,
+  pullNotionSettings,
   pullNotionEntries,
+  pushNotionSettings,
   pushNotionEntries,
 } from './notion'
-import type { NotionEntryInput, NotionEntryRecord } from './notion'
+import type { NotionEntryInput, NotionEntryRecord, NotionTagInput, NotionTagRecord } from './notion'
 import {
   deleteQiniuObject,
   getQiniuAttachmentDataUrl,
@@ -42,6 +44,8 @@ export interface CalendarDataSource {
   saveEntry(entry: CalendarEntry, tags: Tag[]): Promise<CalendarEntry>
   /** 删除一条记录（远端模式归档远端页面） */
   deleteEntry(entry: CalendarEntry): Promise<void>
+  /** 可选：把标签等设置写入远程设置库（远程直连模式） */
+  syncTags?(tags: Tag[]): Promise<void>
 }
 
 export type RemoteProviderId = 'notion' | 'qiniu'
@@ -88,6 +92,56 @@ export function toNotionEntryInput(entry: CalendarEntry, tags: Tag[], dataSource
   return input
 }
 
+export function toNotionTagInput(tag: Tag): NotionTagInput {
+  return {
+    id: tag.id,
+    name: tag.name,
+    color: tag.color,
+    retired: tag.retired ?? false,
+  }
+}
+
+function isTagColor(value: string | undefined): value is Tag['color'] {
+  return Boolean(value && (TAG_COLORS as readonly string[]).includes(value))
+}
+
+/**
+ * 把设置数据库中的标签定义合并到本地。
+ * - 同名标签复用本地 id，记录引用不断链；
+ * - 设置数据库是标签定义（颜色/停用/页面引用）的权威来源；
+ * - 记录里出现但设置库还没收录的标签，由保存/推送时写回设置库。
+ */
+export function mergeNotionSettingsTags(
+  records: NotionTagRecord[],
+  currentTags: Tag[],
+): Tag[] {
+  const nextTags = currentTags.map((tag) => ({ ...tag }))
+  const byName = new Map(nextTags.map((tag) => [tag.name.toLowerCase(), tag]))
+
+  for (const record of records) {
+    const name = record.name.trim()
+    if (!name) continue
+    const key = name.toLowerCase()
+    const existing = byName.get(key)
+    const color = isTagColor(record.color) ? record.color : undefined
+    if (existing) {
+      if (color) existing.color = color
+      existing.retired = record.retired
+      continue
+    }
+    const tag: Tag = {
+      // 设置库中保存的 ID 让换设备后仍能拿到同一个稳定 id
+      id: record.tagId || createId('tag'),
+      name,
+      color: color ?? TAG_COLORS[nextTags.length % TAG_COLORS.length],
+      retired: record.retired,
+    }
+    nextTags.push(tag)
+    byName.set(key, tag)
+  }
+  return nextTags
+}
+
 export function mergeNotionRecords(
   records: NotionEntryRecord[],
   currentEntries: CalendarEntry[],
@@ -110,7 +164,11 @@ export function mergeNotionRecords(
       tagByName.set(key, tag)
       return tag.id
     }).filter((tagId): tagId is string => Boolean(tagId))
-    const existingIndex = nextEntries.findIndex((entry) => getRemoteRef(entry, 'notion')?.id === record.remoteId)
+    // 一天一条：先按日期合并，避免远端重建/换库后同一天出现两条本地记录。
+    let existingIndex = nextEntries.findIndex((entry) => entry.date === record.date)
+    if (existingIndex < 0) {
+      existingIndex = nextEntries.findIndex((entry) => getRemoteRef(entry, 'notion')?.id === record.remoteId)
+    }
     const previous = existingIndex >= 0 ? nextEntries[existingIndex] : undefined
     const attachments = record.attachments.map((attachment, index) => {
       const previousAttachment = previous?.attachments.find((item) => (
@@ -196,17 +254,62 @@ export function createNotionDataSource(
     return { token: settings.notionToken, databaseId, dataSourceId }
   }
 
+  async function settingsTarget(): Promise<{ token: string; databaseId: string; dataSourceId: string } | null> {
+    const settings = readSettings()
+    if (!settings.notionSettingsDatabaseId.trim()) return null
+    // 与日期数据源解析规则保持一致，判断两者是否指向同一份 Notion 数据
+    const dateDataset = settings.notionDatasets.find(
+      (item) => `${item.databaseId}:${item.dataSourceId}` === `${settings.notionDatabaseId}:${settings.notionDataSourceId}`,
+    ) ?? settings.notionDatasets.find((item) => item.databaseId === settings.notionDatabaseId)
+    ?? (settings.notionDatabaseId.trim() ? undefined : settings.notionDatasets[0])
+    const dateDatabaseId = dateDataset?.databaseId ?? settings.notionDatabaseId.trim()
+    const dateDataSourceId = dateDataset?.dataSourceId ?? settings.notionDataSourceId.trim()
+    const dataset = settings.notionDatasets.find(
+      (item) => `${item.databaseId}:${item.dataSourceId}` === `${settings.notionSettingsDatabaseId}:${settings.notionSettingsDataSourceId}`,
+    ) ?? settings.notionDatasets.find((item) => item.databaseId === settings.notionSettingsDatabaseId)
+    const databaseId = dataset?.databaseId ?? settings.notionSettingsDatabaseId.trim()
+    const dataSourceId = dataset?.dataSourceId ?? settings.notionSettingsDataSourceId.trim()
+    if (!settings.notionToken.trim() || !databaseId) return null
+    // 与日期数据源是同一份数据则跳过设置同步：避免把记录页面误当成标签设置归档
+    const sameStore = databaseId === dateDatabaseId
+      && (!dataSourceId || !dateDataSourceId || dataSourceId === dateDataSourceId)
+    if (sameStore) return null
+    return { token: settings.notionToken, databaseId, dataSourceId }
+  }
+
+  async function pullSettingsTags(knownTags: Tag[]): Promise<Tag[]> {
+    const target = await settingsTarget()
+    if (!target) return knownTags
+    const { token, databaseId, dataSourceId } = target
+    const result = await pullNotionSettings(token, databaseId, dataSourceId || undefined)
+    return mergeNotionSettingsTags(result.tags, knownTags)
+  }
+
+  async function pushSettingsTags(tags: Tag[]): Promise<void> {
+    const target = await settingsTarget()
+    if (!target) return
+    const { token, databaseId, dataSourceId } = target
+    await pushNotionSettings(
+      token,
+      databaseId,
+      dataSourceId || undefined,
+      tags.map(toNotionTagInput),
+    )
+  }
+
   return {
     kind: 'notion',
     async loadMonth(year, month, knownTags) {
       const { token, databaseId, dataSourceId } = await target()
       const { start, end } = monthRange(year, month)
+      // 标签定义来自设置数据库；日期数据库只提供记录内容和记录上的标签名
+      const settingsTags = await pullSettingsTags(knownTags)
       const result = await pullNotionEntries(token, databaseId, dataSourceId || undefined, {
         dateStart: start,
         dateEnd: end,
       })
       // 复用已知标签的 id：否则每次加载生成新 id，旧标签列表与新记录脱节导致标签“消失”
-      return mergeNotionRecords(result.entries, [], knownTags)
+      return mergeNotionRecords(result.entries, [], settingsTags)
     },
     async queryTagDates(tagName) {
       const { token, databaseId, dataSourceId } = await target()
@@ -225,6 +328,8 @@ export function createNotionDataSource(
       )
       const pushed = result.entries.find((item) => item.localId === entry.id)
       if (!pushed) return entry
+      // 保存记录的同时同步标签定义，保证新标签/停用状态写进设置数据库
+      await pushSettingsTags(tags)
       const attachments = entry.attachments.map((attachment, index) => {
         const reference = pushed.attachments?.[index]
         if (!reference || reference.name !== attachment.name) return attachment
@@ -247,10 +352,12 @@ export function createNotionDataSource(
       }
     },
     async deleteEntry(entry) {
-      const notionRef = getRemoteRef(entry, 'notion')
-      if (!notionRef) return
-      const { token } = await target()
-      await archiveNotionPage(token, notionRef.id)
+      const { token, databaseId, dataSourceId } = await target()
+      // 一天一条：删除直接按日期归档远端页面，不依赖本地引用是否存在。
+      await archiveNotionPagesByDate(token, databaseId, entry.date, dataSourceId || undefined)
+    },
+    async syncTags(nextTags) {
+      await pushSettingsTags(nextTags)
     },
   }
 }

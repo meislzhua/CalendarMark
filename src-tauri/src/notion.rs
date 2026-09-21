@@ -10,6 +10,10 @@ const NOTION_VERSION: &str = "2026-03-11";
 const USER_AGENT: &str = "CalendarMark/0.1.0";
 const PAGE_SIZE: u64 = 100;
 const MAX_FILE_BYTES: usize = 5 * 1024 * 1024;
+/// 设置库中属于 CalendarMark 的唯一设置记录标题。
+/// 标签等设置全部保存在这一条记录里：读取只查这一条，
+/// 不会加载设置库中其他项目/工具的内容。
+const NOTION_SETTINGS_PAGE_TITLE: &str = "CalendarMark 标签";
 // Android 移动网络下 DNS / 建连失败比桌面更常见（切换基站、IPv6 抖动、运营商网络拦截）。
 // 客户端必须显式设置超时，否则被丢弃的 SYN 包会让“发现数据集”永远停在加载状态。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -205,6 +209,79 @@ pub struct NotionPushResult {
     pub connection: NotionConnectionInfo,
     pub entries: Vec<NotionPushRecord>,
     pub warnings: Vec<String>,
+}
+
+/// 设置数据库（保存标签等应用设置）的字段映射。
+/// 日期数据库负责“一天一条”的日历记录；设置数据库负责应用级配置，
+/// CalendarMark 只维护一条自己的记录，避免读取/影响设置库中的其他项目内容。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionSettingsMappingInfo {
+    pub ready: bool,
+    pub name_property: Option<String>,
+    /// 保存标签设置 JSON 的 rich_text 属性（例如“标签”/“内容”）
+    pub data_property: Option<String>,
+    /// 以下三个字段仅用于读取旧版“每个标签一行”的数据做迁移
+    pub color_property: Option<String>,
+    pub color_property_type: Option<String>,
+    pub retired_property: Option<String>,
+    pub id_property: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionSettingsConnectionInfo {
+    pub database_id: String,
+    pub database_title: String,
+    pub data_source_id: String,
+    pub data_source_name: String,
+    pub properties: Vec<NotionPropertyInfo>,
+    pub mapping: NotionSettingsMappingInfo,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionTagRecord {
+    pub remote_id: String,
+    pub tag_id: Option<String>,
+    pub name: String,
+    pub color: Option<String>,
+    pub retired: bool,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionSettingsPullResult {
+    pub connection: NotionSettingsConnectionInfo,
+    pub tags: Vec<NotionTagRecord>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionTagInput {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub retired: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionSettingsPushResult {
+    pub connection: NotionSettingsConnectionInfo,
+    pub tags: Vec<NotionTagRecord>,
+    pub warnings: Vec<String>,
+}
+
+/// Token 连通性测试结果（GET /users/me）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotionTokenTestResult {
+    pub bot_name: Option<String>,
+    pub workspace_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -508,11 +585,52 @@ pub async fn notion_push_entries(
     let mut warnings = Vec::new();
     append_mapping_warnings(&connected.info.mapping, &mut warnings);
 
+    // CalendarMark 的 Notion 语义是“每个日期只有一条记录”。
+    // 远程引用可能因为本地重建、切换数据集或旧版本写入而丢失/过期，
+    // 因此推送时一律先按日期查询远端页面：有则更新，无则创建；
+    // 同一天已存在多条旧数据时保留最新一条并归档其余重复页。
+    let mut page_id_by_date: HashMap<String, String> = HashMap::new();
+
     for entry in entries {
         let (properties, uploaded_attachments, attachment_refs) =
             build_page_properties(&client, &token, &connected, &entry, &mut warnings).await?;
-        let response = if let Some(remote_id) = entry.remote_id.as_deref() {
-            let page_id = normalize_uuid(remote_id, "Notion page ID")?;
+
+        let cached_id = page_id_by_date
+            .get(entry.date.trim())
+            .cloned()
+            .unwrap_or_default();
+        let existing_pages = query_pages_by_date(&client, &token, &connected, &entry.date).await?;
+        let requested_remote_id = entry
+            .remote_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|value| normalize_uuid(value, "Notion page ID").ok());
+        let (target_page_id, duplicate_ids, reference_mismatch) =
+            resolve_target_page(requested_remote_id.as_deref(), &existing_pages, &cached_id);
+        if reference_mismatch {
+            warnings.push(format!(
+                "记录 {} 引用的 Notion 页面不属于日期 {}，已忽略该引用并按日期写入。",
+                entry.local_id, entry.date
+            ));
+        }
+
+        // 归档同一天的多余页面，保证“一天一条”。
+        for duplicate_id in duplicate_ids {
+            match archive_page_quietly(&client, &token, &duplicate_id).await {
+                Ok(()) => warnings.push(format!(
+                    "日期 {} 存在重复记录，已归档多余 Notion 页面 {duplicate_id}。",
+                    entry.date
+                )),
+                Err(message) => warnings.push(format!(
+                    "日期 {} 存在重复记录，但归档页面 {duplicate_id} 失败：{message}",
+                    entry.date
+                )),
+            }
+        }
+
+        let response = if let Some(page_id) = target_page_id.as_deref() {
+            page_id_by_date.insert(entry.date.trim().to_string(), page_id.to_string());
             request_json(
                 &client,
                 &token,
@@ -540,6 +658,7 @@ pub async fn notion_push_entries(
             .and_then(Value::as_str)
             .ok_or_else(|| "Notion 创建或更新页面成功，但响应中缺少页面 ID。".to_string())?
             .to_string();
+        page_id_by_date.insert(entry.date.trim().to_string(), remote_id.clone());
         pushed.push(NotionPushRecord {
             local_id: entry.local_id,
             remote_id,
@@ -578,6 +697,187 @@ pub async fn notion_archive_page(token: String, page_id: String) -> Result<(), S
     )
     .await?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn notion_archive_pages_by_date(
+    token: String,
+    database_id: String,
+    data_source_id: Option<String>,
+    date: String,
+) -> Result<usize, String> {
+    let client = notion_client()?;
+    let connected =
+        connect_notion(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    let pages = query_pages_by_date(&client, &token, &connected, &date).await?;
+    let mut archived = 0usize;
+    for page in pages {
+        let Some(raw_id) = page.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(page_id) = normalize_uuid(raw_id, "Notion page ID") else {
+            continue;
+        };
+        archive_page_quietly(&client, &token, &page_id).await?;
+        archived += 1;
+    }
+    Ok(archived)
+}
+
+async fn archive_page_quietly(client: &Client, token: &str, page_id: &str) -> Result<(), String> {
+    let page_id = normalize_uuid(page_id, "Notion page ID")?;
+    request_json(
+        client,
+        token,
+        Method::PATCH,
+        &format!("/pages/{page_id}"),
+        Some(json!({ "in_trash": true })),
+    )
+    .await?;
+    Ok(())
+}
+
+/// “一天一条”的核心选择规则：
+/// 1. 本地引用的页面如果确实属于这个日期，优先更新它；
+/// 2. 否则更新该日期最近编辑的页面；
+/// 3. 查询结果可能因 Notion 最终一致性缺失，回退到同批推送缓存；
+/// 4. 其余同日期页面视为重复，调用方负责归档。
+/// 返回 (目标页面, 需归档的重复页面, 本地引用是否与日期不匹配)。
+fn resolve_target_page(
+    requested_remote_id: Option<&str>,
+    existing_pages: &[Value],
+    cached_id: &str,
+) -> (Option<String>, Vec<String>, bool) {
+    let mut candidate_ids = Vec::new();
+    for page in existing_pages {
+        if let Some(id) = page.get("id").and_then(Value::as_str) {
+            if let Ok(id) = normalize_uuid(id, "Notion page ID") {
+                if !candidate_ids.contains(&id) {
+                    candidate_ids.push(id);
+                }
+            }
+        }
+    }
+    let cached_trimmed = cached_id.trim();
+    let cached = if cached_trimmed.is_empty() {
+        None
+    } else {
+        normalize_uuid(cached_trimmed, "Notion page ID").ok()
+    };
+    if let Some(cached) = cached.as_ref() {
+        if !candidate_ids.contains(cached) {
+            candidate_ids.push(cached.clone());
+        }
+    }
+
+    let requested = requested_remote_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| normalize_uuid(value, "Notion page ID").ok());
+    let mismatch = requested
+        .as_ref()
+        .is_some_and(|id| !candidate_ids.contains(id));
+
+    let newest_page_id = existing_pages
+        .first()
+        .and_then(|page| page.get("id"))
+        .and_then(Value::as_str)
+        .and_then(|id| normalize_uuid(id, "Notion page ID").ok());
+
+    let target = requested
+        .filter(|id| candidate_ids.contains(id))
+        .or(newest_page_id)
+        .or(cached);
+
+    let duplicates = candidate_ids
+        .into_iter()
+        .filter(|id| target.as_ref() != Some(id))
+        .collect();
+    (target, duplicates, mismatch)
+}
+
+/// 查询某个日期在 Notion 中已有的页面（最近编辑的排最前）。
+/// 推送记录时先调用它，实现“修改 = 更新该日期那一条，而不是新增”。
+async fn query_pages_by_date(
+    client: &Client,
+    token: &str,
+    connected: &ConnectedNotion,
+    date: &str,
+) -> Result<Vec<Value>, String> {
+    let date_property = connected
+        .info
+        .mapping
+        .date_property
+        .clone()
+        .ok_or_else(|| "Notion 日期字段未识别，无法按日期更新记录。".to_string())?;
+    if !is_date_key(date) {
+        return Err(format!("日期格式无效：{date}，应为 YYYY-MM-DD。"));
+    }
+
+    let mut pages = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    let mut batches = 0usize;
+
+    loop {
+        batches += 1;
+        if batches > 1_000 {
+            return Err("按日期查询 Notion 记录时分页超过限制，已停止。".to_string());
+        }
+
+        let mut body = Map::new();
+        body.insert("page_size".to_string(), json!(PAGE_SIZE));
+        body.insert(
+            "filter".to_string(),
+            json!({
+                "property": date_property,
+                "date": { "equals": date }
+            }),
+        );
+        body.insert(
+            "sorts".to_string(),
+            json!([{
+                "direction": "descending",
+                "timestamp": "last_edited_time"
+            }]),
+        );
+        if let Some(start_cursor) = cursor.as_deref() {
+            body.insert("start_cursor".to_string(), json!(start_cursor));
+        }
+
+        let response = request_json(
+            client,
+            token,
+            Method::POST,
+            &format!("/data_sources/{}/query", connected.info.data_source_id),
+            Some(Value::Object(body)),
+        )
+        .await?;
+
+        if let Some(results) = response.get("results").and_then(Value::as_array) {
+            pages.extend(results.iter().cloned());
+        }
+        let has_more = response
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let next_cursor = response
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        if !has_more {
+            break;
+        }
+        let Some(next_cursor) = next_cursor else {
+            return Err("Notion 按日期查询返回 has_more=true，但没有 next_cursor。".to_string());
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err("Notion 按日期查询的分页游标重复，已停止。".to_string());
+        }
+        cursor = Some(next_cursor);
+    }
+
+    Ok(pages)
 }
 
 fn page_title(page: &Value) -> String {
@@ -749,6 +1049,272 @@ pub async fn notion_create_database(
 
     let connected = connect_notion(&client, token, &database_id, None).await?;
     Ok(connected.info)
+}
+
+#[tauri::command]
+pub async fn notion_check_settings_connection(
+    token: String,
+    database_id: String,
+    data_source_id: Option<String>,
+) -> Result<NotionSettingsConnectionInfo, String> {
+    let client = notion_client()?;
+    let connected =
+        connect_notion(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    Ok(settings_connection_from(connected.info))
+}
+
+/// 测试 Integration Token：只调用一次轻量的 /users/me，
+/// 成功返回机器人/工作区名称，失败（含超时、网络、无效 Token）返回可展示的错误信息。
+#[tauri::command]
+pub async fn notion_test_token(token: String) -> Result<NotionTokenTestResult, String> {
+    let client = notion_client()?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("请先填写 Integration Token。".to_string());
+    }
+    let response = request_json(&client, token, Method::GET, "/users/me", None).await?;
+    Ok(NotionTokenTestResult {
+        bot_name: response
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        workspace_name: response
+            .get("workspace_name")
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    })
+}
+
+/// 测试当前数据集：完整走一遍 Database / data source 读取和 schema 映射，
+/// 用于确认 Token、数据库分享、属性结构是否都可用。
+#[tauri::command]
+pub async fn notion_test_dataset(
+    token: String,
+    database_id: String,
+    data_source_id: Option<String>,
+) -> Result<NotionConnectionInfo, String> {
+    let client = notion_client()?;
+    let connected =
+        connect_notion(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    Ok(connected.info)
+}
+
+#[tauri::command]
+pub async fn notion_pull_settings(
+    token: String,
+    database_id: String,
+    data_source_id: Option<String>,
+) -> Result<NotionSettingsPullResult, String> {
+    let client = notion_client()?;
+    let connection =
+        connect_notion_settings(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    ensure_settings_mapping_ready(&connection.mapping)?;
+
+    let mut warnings = Vec::new();
+    let mut tags = Vec::new();
+    let records = query_settings_record_pages(&client, &token, &connection).await?;
+
+    if let Some((page_id, page)) = records.first() {
+        if records.len() > 1 {
+            warnings.push(format!(
+                "设置数据库中存在 {} 条「{NOTION_SETTINGS_PAGE_TITLE}」记录，已使用最近编辑的一条，其余不会被修改。",
+                records.len()
+            ));
+        }
+        let text = page
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| {
+                property_text(
+                    properties,
+                    connection.mapping.data_property.as_deref(),
+                    "rich_text",
+                )
+            })
+            .unwrap_or_default();
+        let updated_at = page
+            .get("last_edited_time")
+            .or_else(|| page.get("created_time"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        match parse_settings_tags_json(&text) {
+            Ok(items) => {
+                tags = items
+                    .into_iter()
+                    .map(|item| NotionTagRecord {
+                        remote_id: page_id.clone(),
+                        tag_id: Some(item.id),
+                        name: item.name,
+                        color: item.color,
+                        retired: item.retired,
+                        updated_at: updated_at.clone(),
+                    })
+                    .collect();
+            }
+            Err(message) => warnings.push(format!(
+                "「{NOTION_SETTINGS_PAGE_TITLE}」记录内容无法解析（{message}），本次按无标签处理。"
+            )),
+        }
+    } else {
+        // 旧版数据迁移：首次升级时读取一次“每个标签一行”的旧数据；
+        // 下次保存会写入单条设置记录，旧页面不会被修改。
+        let legacy = read_legacy_tag_pages(&client, &token, &connection).await?;
+        if !legacy.is_empty() {
+            warnings.push(format!(
+                "已读取 {} 个旧版逐行标签；下次保存时会合并为一条「{NOTION_SETTINGS_PAGE_TITLE}」记录，旧页面保持不变。",
+                legacy.len()
+            ));
+        }
+        tags = legacy;
+    }
+
+    Ok(NotionSettingsPullResult {
+        connection,
+        tags,
+        warnings,
+    })
+}
+
+#[tauri::command]
+pub async fn notion_push_settings(
+    token: String,
+    database_id: String,
+    data_source_id: Option<String>,
+    tags: Vec<NotionTagInput>,
+) -> Result<NotionSettingsPushResult, String> {
+    let client = notion_client()?;
+    let connection =
+        connect_notion_settings(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    ensure_settings_mapping_ready(&connection.mapping)?;
+
+    let mut warnings = Vec::new();
+    let clean_tags: Vec<&NotionTagInput> = tags
+        .iter()
+        .filter(|tag| !tag.name.trim().is_empty())
+        .collect();
+    let payload = settings_tags_json(&clean_tags);
+
+    let mut properties = Map::new();
+    if let Some(property_name) = connection.mapping.name_property.as_deref() {
+        properties.insert(
+            property_name.to_string(),
+            json!({ "title": rich_text_items(NOTION_SETTINGS_PAGE_TITLE) }),
+        );
+    }
+    if let Some(property_name) = connection.mapping.data_property.as_deref() {
+        properties.insert(
+            property_name.to_string(),
+            json!({ "rich_text": rich_text_items(&payload) }),
+        );
+    }
+
+    let records = query_settings_record_pages(&client, &token, &connection).await?;
+    if records.len() > 1 {
+        warnings.push(format!(
+            "设置数据库中存在 {} 条「{NOTION_SETTINGS_PAGE_TITLE}」记录，已更新最近编辑的一条，其余保持不变。",
+            records.len()
+        ));
+    }
+    let response = if let Some((page_id, _)) = records.first() {
+        request_json(
+            &client,
+            &token,
+            Method::PATCH,
+            &format!("/pages/{page_id}"),
+            Some(json!({ "properties": properties })),
+        )
+        .await?
+    } else {
+        request_json(
+            &client,
+            &token,
+            Method::POST,
+            "/pages",
+            Some(json!({
+                "parent": { "data_source_id": connection.data_source_id },
+                "properties": properties
+            })),
+        )
+        .await?
+    };
+
+    let remote_id = response
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Notion 保存标签设置成功，但响应中缺少页面 ID。".to_string())?
+        .to_string();
+    let updated_at = response
+        .get("last_edited_time")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let saved = parse_settings_tags_json(&payload)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| NotionTagRecord {
+            remote_id: remote_id.clone(),
+            tag_id: Some(item.id),
+            name: item.name,
+            color: item.color,
+            retired: item.retired,
+            updated_at: updated_at.clone(),
+        })
+        .collect();
+
+    // 单条记录方案：只读写自己的「CalendarMark 标签」页面。
+    // 设置库中的其他内容（其他项目/工具的行）既不会被读取，也不会被归档。
+
+    Ok(NotionSettingsPushResult {
+        connection,
+        tags: saved,
+        warnings,
+    })
+}
+
+#[tauri::command]
+pub async fn notion_create_settings_database(
+    token: String,
+    parent_page_id: String,
+    title: String,
+) -> Result<NotionSettingsConnectionInfo, String> {
+    let client = notion_client()?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("请先填写 Notion Integration Token。".to_string());
+    }
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("请填写新数据库的名称。".to_string());
+    }
+    let parent_page_id = normalize_uuid(&parent_page_id, "Notion parent page ID")?;
+
+    let database = request_json(
+        &client,
+        token,
+        Method::POST,
+        "/databases",
+        Some(json!({
+            "parent": { "type": "page_id", "page_id": parent_page_id },
+            "title": [{ "type": "text", "text": { "content": title } }],
+            "properties": {
+                "名称": { "title": {} },
+                "标签": { "rich_text": {} }
+            }
+        })),
+    )
+    .await?;
+
+    let database_id = database
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Notion 创建数据库成功，但响应中缺少 Database ID。".to_string())?
+        .to_string();
+
+    let connected = connect_notion(&client, token, &database_id, None).await?;
+    Ok(settings_connection_from(connected.info))
 }
 
 fn notion_client() -> Result<Client, String> {
@@ -945,6 +1511,385 @@ fn build_mapping(properties: &[PropertyDescriptor]) -> NotionMappingInfo {
         mood_property,
         message,
     }
+}
+
+async fn connect_notion_settings(
+    client: &Client,
+    token: &str,
+    database_id: &str,
+    requested_data_source_id: Option<&str>,
+) -> Result<NotionSettingsConnectionInfo, String> {
+    let connected = connect_notion(client, token, database_id, requested_data_source_id).await?;
+    Ok(settings_connection_from(connected.info))
+}
+
+fn settings_connection_from(info: NotionConnectionInfo) -> NotionSettingsConnectionInfo {
+    let mapping = build_settings_mapping(&info.properties);
+    NotionSettingsConnectionInfo {
+        database_id: info.database_id,
+        database_title: info.database_title,
+        data_source_id: info.data_source_id,
+        data_source_name: info.data_source_name,
+        properties: info.properties,
+        mapping,
+    }
+}
+
+fn build_settings_mapping(properties: &[NotionPropertyInfo]) -> NotionSettingsMappingInfo {
+    let descriptors = properties
+        .iter()
+        .map(|property| PropertyDescriptor {
+            name: property.name.clone(),
+            id: property.id.clone(),
+            property_type: property.property_type.clone(),
+        })
+        .collect::<Vec<_>>();
+    let name_property = choose_property(
+        &descriptors,
+        "title",
+        &["name", "名称", "title", "标题", "tag", "标签"],
+    );
+    // 单条设置记录的 JSON 载体：优先“标签/内容/设置”，否则用第一个 rich_text 兜底
+    let data_property = choose_property(
+        &descriptors,
+        "rich_text",
+        &[
+            "tags", "标签", "content", "内容", "settings", "设置", "data", "值",
+        ],
+    );
+    // 以下三个字段仅用于读取旧版逐行标签数据
+    let color_property = choose_property(&descriptors, "select", &["color", "颜色", "色彩"])
+        .or_else(|| choose_property(&descriptors, "rich_text", &["color", "颜色", "色彩"]));
+    let color_property_type = color_property.as_ref().map(|name| {
+        properties
+            .iter()
+            .find(|property| &property.name == name)
+            .map(|property| property.property_type.clone())
+            .unwrap_or_else(|| "select".to_string())
+    });
+    let retired_property = choose_property(
+        &descriptors,
+        "checkbox",
+        &["retired", "停用", "已停用", "disabled"],
+    );
+    let id_property = choose_property(
+        &descriptors,
+        "rich_text",
+        &["id", "标识", "tag id", "标签id"],
+    );
+    let ready = name_property.is_some() && data_property.is_some();
+    let message = if ready {
+        None
+    } else {
+        Some(
+            "设置数据库需要一个 title 属性（例如“名称”）和一个 rich_text 属性（例如“标签”）保存 CalendarMark 的标签设置。"
+                .to_string(),
+        )
+    };
+
+    NotionSettingsMappingInfo {
+        ready,
+        name_property,
+        data_property,
+        color_property,
+        color_property_type,
+        retired_property,
+        id_property,
+        message,
+    }
+}
+
+fn ensure_settings_mapping_ready(mapping: &NotionSettingsMappingInfo) -> Result<(), String> {
+    if mapping.ready {
+        return Ok(());
+    }
+    Err(mapping
+        .message
+        .clone()
+        .unwrap_or_else(|| "Notion 设置数据库字段映射不完整。".to_string()))
+}
+
+async fn query_all_data_source_pages(
+    client: &Client,
+    token: &str,
+    data_source_id: &str,
+) -> Result<Vec<Value>, String> {
+    let mut pages = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    let mut batches = 0usize;
+
+    loop {
+        batches += 1;
+        if batches > 1_000 {
+            return Err("读取 Notion 设置时分页超过限制，已停止。".to_string());
+        }
+
+        let mut body = Map::new();
+        body.insert("page_size".to_string(), json!(PAGE_SIZE));
+        body.insert(
+            "sorts".to_string(),
+            json!([{ "direction": "descending", "timestamp": "last_edited_time" }]),
+        );
+        if let Some(start_cursor) = cursor.as_deref() {
+            body.insert("start_cursor".to_string(), json!(start_cursor));
+        }
+
+        let response = request_json(
+            client,
+            token,
+            Method::POST,
+            &format!("/data_sources/{data_source_id}/query"),
+            Some(Value::Object(body)),
+        )
+        .await?;
+
+        if let Some(results) = response.get("results").and_then(Value::as_array) {
+            pages.extend(results.iter().cloned());
+        }
+        let has_more = response
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let next_cursor = response
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        if !has_more {
+            break;
+        }
+        let Some(next_cursor) = next_cursor else {
+            return Err("Notion 设置分页返回 has_more=true，但没有 next_cursor。".to_string());
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err("Notion 设置分页游标重复，已停止。".to_string());
+        }
+        cursor = Some(next_cursor);
+    }
+
+    Ok(pages)
+}
+
+fn parse_tag_page(
+    page: &Value,
+    mapping: &NotionSettingsMappingInfo,
+) -> Result<NotionTagRecord, String> {
+    let remote_id = page
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Notion 设置页面缺少 ID，已跳过。".to_string())?
+        .to_string();
+    let properties = page
+        .get("properties")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("Notion 设置页面 {remote_id} 缺少 properties，已跳过。"))?;
+    let name = property_text(properties, mapping.name_property.as_deref(), "title")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return Err(format!(
+            "Notion 设置页面 {remote_id} 没有标签名称，已跳过。"
+        ));
+    }
+
+    let color = mapping.color_property.as_deref().and_then(|property_name| {
+        let property = properties.get(property_name)?;
+        match mapping.color_property_type.as_deref() {
+            Some("rich_text") => property_text(properties, Some(property_name), "rich_text"),
+            _ => property
+                .get("select")
+                .and_then(|select| select.get("name"))
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .map(ToOwned::to_owned),
+        }
+    });
+    let retired = mapping
+        .retired_property
+        .as_deref()
+        .and_then(|property_name| properties.get(property_name))
+        .and_then(|property| property.get("checkbox"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let tag_id = mapping
+        .id_property
+        .as_deref()
+        .and_then(|property_name| property_text(properties, Some(property_name), "rich_text"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    Ok(NotionTagRecord {
+        remote_id,
+        tag_id,
+        name,
+        color,
+        retired,
+        updated_at: page
+            .get("last_edited_time")
+            .or_else(|| page.get("created_time"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// 单条设置记录中保存的标签定义（JSON 字段）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct NotionSettingsTagItem {
+    id: String,
+    name: String,
+    color: Option<String>,
+    retired: bool,
+}
+
+/// 生成设置记录中的 JSON：只记录 CalendarMark 当前实际的标签
+fn settings_tags_json(tags: &[&NotionTagInput]) -> String {
+    json!({
+        "version": 1,
+        "tags": tags
+            .iter()
+            .map(|tag| {
+                json!({
+                    "id": tag.id,
+                    "name": tag.name.trim(),
+                    "color": tag.color,
+                    "retired": tag.retired.unwrap_or(false),
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+fn parse_settings_tags_json(text: &str) -> Result<Vec<NotionSettingsTagItem>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SettingsDocument {
+        #[serde(default)]
+        tags: Vec<NotionSettingsTagItem>,
+    }
+    let document: SettingsDocument =
+        serde_json::from_str(trimmed).map_err(|error| error.to_string())?;
+    Ok(document
+        .tags
+        .into_iter()
+        .map(|mut item| {
+            item.name = item.name.trim().to_string();
+            item
+        })
+        .filter(|item| !item.name.is_empty())
+        .collect())
+}
+
+/// 按标题精确查找设置库中属于 CalendarMark 的唯一设置记录（最近编辑在前）
+async fn query_settings_record_pages(
+    client: &Client,
+    token: &str,
+    connection: &NotionSettingsConnectionInfo,
+) -> Result<Vec<(String, Value)>, String> {
+    let name_property =
+        connection.mapping.name_property.clone().ok_or_else(|| {
+            "设置数据库缺少 title 属性，无法定位 CalendarMark 设置记录。".to_string()
+        })?;
+
+    let mut records = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    let mut batches = 0usize;
+
+    loop {
+        batches += 1;
+        if batches > 100 {
+            return Err("读取 CalendarMark 设置记录时分页超过限制，已停止。".to_string());
+        }
+
+        let mut body = Map::new();
+        body.insert("page_size".to_string(), json!(PAGE_SIZE));
+        body.insert(
+            "filter".to_string(),
+            json!({
+                "property": name_property,
+                "title": { "equals": NOTION_SETTINGS_PAGE_TITLE }
+            }),
+        );
+        body.insert(
+            "sorts".to_string(),
+            json!([{ "direction": "descending", "timestamp": "last_edited_time" }]),
+        );
+        if let Some(start_cursor) = cursor.as_deref() {
+            body.insert("start_cursor".to_string(), json!(start_cursor));
+        }
+
+        let response = request_json(
+            client,
+            token,
+            Method::POST,
+            &format!("/data_sources/{}/query", connection.data_source_id),
+            Some(Value::Object(body)),
+        )
+        .await?;
+
+        if let Some(results) = response.get("results").and_then(Value::as_array) {
+            for page in results {
+                let Some(raw_id) = page.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Ok(id) = normalize_uuid(raw_id, "Notion page ID") else {
+                    continue;
+                };
+                records.push((id, page.clone()));
+            }
+        }
+
+        let has_more = response
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let next_cursor = response
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        if !has_more {
+            break;
+        }
+        let Some(next_cursor) = next_cursor else {
+            return Err(
+                "CalendarMark 设置记录分页返回 has_more=true，但没有 next_cursor。".to_string(),
+            );
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err("CalendarMark 设置记录分页游标重复，已停止。".to_string());
+        }
+        cursor = Some(next_cursor);
+    }
+
+    Ok(records)
+}
+
+/// 旧版迁移：读取“每个标签一行”的旧数据。仅在还没有单条设置记录时调用一次，
+/// 用于把旧标签带回应用；之后保存会写入单条记录，旧页面保持不变。
+async fn read_legacy_tag_pages(
+    client: &Client,
+    token: &str,
+    connection: &NotionSettingsConnectionInfo,
+) -> Result<Vec<NotionTagRecord>, String> {
+    let pages = query_all_data_source_pages(client, token, &connection.data_source_id).await?;
+    let mut records = Vec::new();
+    let mut seen_names: HashSet<String> = HashSet::new();
+    for page in pages {
+        if let Ok(record) = parse_tag_page(&page, &connection.mapping) {
+            if seen_names.insert(normalize_property_name(&record.name)) {
+                records.push(record);
+            }
+        }
+    }
+    Ok(records)
 }
 
 fn choose_property(
@@ -1666,5 +2611,120 @@ mod tests {
             parent_database_id(&value),
             Some("0123456789abcdef0123456789abcdef")
         );
+    }
+
+    fn page(id: &str) -> Value {
+        json!({ "id": id })
+    }
+
+    #[test]
+    fn creates_new_page_when_date_has_no_page() {
+        let (target, duplicates, mismatch) = resolve_target_page(None, &[], "");
+        assert_eq!(target, None);
+        assert!(duplicates.is_empty());
+        assert!(!mismatch);
+    }
+
+    #[test]
+    fn updates_existing_page_for_same_date_without_reference() {
+        let pages = vec![page("0123456789abcdef0123456789abcdef")];
+        let (target, duplicates, mismatch) = resolve_target_page(None, &pages, "");
+        assert_eq!(
+            target.as_deref(),
+            Some("01234567-89ab-cdef-0123-456789abcdef")
+        );
+        assert!(duplicates.is_empty());
+        assert!(!mismatch);
+    }
+
+    #[test]
+    fn prefers_matching_reference_and_archives_duplicates() {
+        let newest = "0123456789abcdef0123456789abcdef";
+        let stale = "fedcba9876543210fedcba9876543210";
+        let pages = vec![page(newest), page(stale)];
+        let (target, duplicates, mismatch) = resolve_target_page(Some(stale), &pages, "");
+        assert_eq!(
+            target.as_deref(),
+            Some("fedcba98-7654-3210-fedc-ba9876543210")
+        );
+        assert_eq!(duplicates, vec!["01234567-89ab-cdef-0123-456789abcdef"]);
+        assert!(!mismatch);
+    }
+
+    #[test]
+    fn ignores_reference_pointing_to_another_date() {
+        let pages = vec![page("0123456789abcdef0123456789abcdef")];
+        let other = "fedcba9876543210fedcba9876543210";
+        let (target, duplicates, mismatch) = resolve_target_page(Some(other), &pages, "");
+        assert_eq!(
+            target.as_deref(),
+            Some("01234567-89ab-cdef-0123-456789abcdef")
+        );
+        assert!(duplicates.is_empty());
+        assert!(mismatch);
+    }
+
+    #[test]
+    fn falls_back_to_batch_cache_when_query_is_eventually_consistent() {
+        let cached = "0123456789abcdef0123456789abcdef";
+        let (target, duplicates, mismatch) = resolve_target_page(None, &[], cached);
+        assert_eq!(
+            target.as_deref(),
+            Some("01234567-89ab-cdef-0123-456789abcdef")
+        );
+        assert!(duplicates.is_empty());
+        assert!(!mismatch);
+    }
+
+    #[test]
+    fn maps_settings_database_properties() {
+        let properties = vec![
+            NotionPropertyInfo {
+                name: "名称".to_string(),
+                id: "title".to_string(),
+                property_type: "title".to_string(),
+            },
+            NotionPropertyInfo {
+                name: "标签".to_string(),
+                id: "tags".to_string(),
+                property_type: "rich_text".to_string(),
+            },
+        ];
+        let mapping = build_settings_mapping(&properties);
+        assert!(mapping.ready);
+        assert_eq!(mapping.name_property.as_deref(), Some("名称"));
+        assert_eq!(mapping.data_property.as_deref(), Some("标签"));
+    }
+
+    #[test]
+    fn settings_tags_json_roundtrip() {
+        let tags = vec![
+            NotionTagInput {
+                id: "tag-1".to_string(),
+                name: "专注".to_string(),
+                color: Some("mint".to_string()),
+                retired: Some(false),
+            },
+            NotionTagInput {
+                id: "tag-2".to_string(),
+                name: "会议".to_string(),
+                color: Some("lavender".to_string()),
+                retired: Some(true),
+            },
+        ];
+        let references: Vec<&NotionTagInput> = tags.iter().collect();
+        let payload = settings_tags_json(&references);
+        let parsed = parse_settings_tags_json(&payload).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "tag-1");
+        assert_eq!(parsed[0].name, "专注");
+        assert_eq!(parsed[0].color.as_deref(), Some("mint"));
+        assert!(!parsed[0].retired);
+        assert!(parsed[1].retired);
+
+        // 空内容 / 空名称都按“无标签”或跳过处理，不报错
+        assert!(parse_settings_tags_json("").unwrap().is_empty());
+        let with_empty = r#"{"tags":[{"id":"x","name":"  ","color":null,"retired":false}]}"#;
+        assert!(parse_settings_tags_json(with_empty).unwrap().is_empty());
     }
 }

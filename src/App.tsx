@@ -57,6 +57,7 @@ import type {
   Tag,
 } from './types'
 import {
+  checkStorageAvailable,
   loadEntries,
   loadSettings,
   loadTags,
@@ -79,9 +80,13 @@ import {
 } from './tauri'
 import {
   checkNotionConnection,
+  checkNotionSettingsConnection,
   createNotionDatabase,
+  createNotionSettingsDatabase,
   discoverNotionDatasets,
   searchNotionPages,
+  testNotionDataset,
+  testNotionToken,
 } from './notion'
 import {
   createLocalDataSource,
@@ -92,6 +97,7 @@ import type {
   NotionConnectionInfo,
   NotionDatasetOption,
   NotionPageOption,
+  NotionSettingsConnectionInfo,
 } from './notion'
 import {
   createRemoteSyncTargets,
@@ -174,6 +180,33 @@ function getNotionTarget(settings: AppSettings): { databaseId: string; dataSourc
   }
 }
 
+function getNotionSettingsTarget(settings: AppSettings): { databaseId: string; dataSourceId: string } {
+  const datasets = settings.notionDatasets ?? []
+  const key = `${settings.notionSettingsDatabaseId}:${settings.notionSettingsDataSourceId}`
+  const dataset = datasets.find((item) => notionDatasetKey(item) === key)
+    ?? datasets.find((item) => item.databaseId === settings.notionSettingsDatabaseId)
+  return {
+    databaseId: dataset?.databaseId ?? settings.notionSettingsDatabaseId.trim(),
+    dataSourceId: dataset?.dataSourceId ?? settings.notionSettingsDataSourceId.trim(),
+  }
+}
+
+/**
+ * 判断两个目标是否指向同一份 Notion 数据（同一个 data source）。
+ * 注意：一个 Database 可能有多个 data source（发现列表里是两行），
+ * 只有 databaseId 相同且无法区分 data source 时才应保守地视为同一份。
+ */
+function sameNotionStore(
+  left: { databaseId: string; dataSourceId?: string },
+  right: { databaseId: string; dataSourceId?: string },
+): boolean {
+  if (left.databaseId !== right.databaseId) return false
+  const leftSource = left.dataSourceId?.trim()
+  const rightSource = right.dataSourceId?.trim()
+  if (leftSource && rightSource) return leftSource === rightSource
+  return true
+}
+
 function isRemoteDataSource(source: AppSettings['dataSource']): boolean {
   return source === 'notion'
 }
@@ -182,18 +215,60 @@ function getRemoteConfigError(settings: AppSettings): string | null {
   if (settings.dataSource === 'local') return null
   if (settings.dataSource === 'notion') {
     const target = getNotionTarget(settings)
-    if (!settings.notionToken.trim() || !target.databaseId) return '请先在设置中配置 Notion Token 并添加数据集'
+    if (!settings.notionToken.trim()) return '请先在设置中配置 Notion Token'
+    if (!target.databaseId) return '请先在设置中选择 Notion 日期数据库'
     return null
   }
   return '当前数据源不可用'
 }
 
-function remoteTargetKey(settings: AppSettings): string {
-  const target = getNotionTarget(settings)
-  return `${target.databaseId}:${target.dataSourceId}`
+/** 设置数据库可用 = 已选择且不与日期数据库相同；不满足时只跳过标签设置同步，绝不阻塞日历读写 */
+function notionSettingsSyncEnabled(settings: AppSettings): boolean {
+  const dateTarget = getNotionTarget(settings)
+  const settingsTarget = getNotionSettingsTarget(settings)
+  return Boolean(
+    settings.notionToken.trim()
+      && settingsTarget.databaseId
+      && !sameNotionStore(settingsTarget, dateTarget),
+  )
 }
 
-function withNotionDataset(settings: AppSettings, dataset: NotionDataset): AppSettings {
+/** 未启用设置同步的具体原因，用于界面提示；返回 null 表示标签设置同步正常 */
+function notionSettingsDisabledReason(settings: AppSettings): string | null {
+  if (notionSettingsSyncEnabled(settings)) return null
+  const dateTarget = getNotionTarget(settings)
+  const settingsTarget = getNotionSettingsTarget(settings)
+  if (!settings.notionToken.trim()) return null
+  if (settingsTarget.databaseId && sameNotionStore(settingsTarget, dateTarget)) {
+    return '设置数据库与日期数据库指向同一份数据，标签设置不会写入 Notion；请选择另一个数据源或数据库作为设置库'
+  }
+  if (!settingsTarget.databaseId) {
+    return '还未选择 Notion 设置数据库，标签只保存在本机；选择后自动同步'
+  }
+  return null
+}
+
+/**
+ * 设置数据库是“标签等设置”的保存位置，但不是远程直连的硬性门槛：
+ * 老配置 / 跨版本打开时只选过日期数据库，日历仍可直接读写，
+ * 未选设置数据库时只提示，不把整个数据源判为待配置。
+ */
+function notionSettingsMissing(settings: AppSettings): boolean {
+  if (!isRemoteDataSource(settings.dataSource)) return false
+  return !notionSettingsSyncEnabled(settings)
+}
+
+function remoteTargetKey(settings: AppSettings): string {
+  const target = getNotionTarget(settings)
+  const settingsTarget = getNotionSettingsTarget(settings)
+  return `${target.databaseId}:${target.dataSourceId}|${settingsTarget.databaseId}:${settingsTarget.dataSourceId}`
+}
+
+function withNotionDataset(
+  settings: AppSettings,
+  dataset: NotionDataset,
+  role: 'date' | 'settings' = 'date',
+): AppSettings {
   const datasets = settings.notionDatasets ?? []
   const datasetKey = notionDatasetKey(dataset)
   const existingIndex = datasets.findIndex((item) => notionDatasetKey(item) === datasetKey)
@@ -203,8 +278,15 @@ function withNotionDataset(settings: AppSettings, dataset: NotionDataset): AppSe
     notionDatasets: existingIndex >= 0
       ? datasets.map((item, index) => (index === existingIndex ? dataset : item))
       : [...datasets, dataset],
-    notionDatabaseId: dataset.databaseId,
-    notionDataSourceId: dataset.dataSourceId,
+    ...(role === 'date'
+      ? {
+          notionDatabaseId: dataset.databaseId,
+          notionDataSourceId: dataset.dataSourceId,
+        }
+      : {
+          notionSettingsDatabaseId: dataset.databaseId,
+          notionSettingsDataSourceId: dataset.dataSourceId,
+        }),
   }
 }
 
@@ -317,8 +399,15 @@ function App() {
           if (cancelled) return
           loadedMonthsRef.current.add(monthKey)
           setTags((previous) => {
-            const known = new Set(previous.map((tag) => tag.name.toLowerCase()))
-            return [...previous, ...result.newTags.filter((tag) => !known.has(tag.name.toLowerCase()))]
+            // 按名称合并：设置数据库中的颜色/停用状态要覆盖本地，
+            // 同时复用本地 id，避免记录上的 tagIds 断链。
+            const byName = new Map(previous.map((tag) => [tag.name.toLowerCase(), tag]))
+            for (const tag of result.newTags) {
+              const key = tag.name.toLowerCase()
+              const existing = byName.get(key)
+              byName.set(key, existing ? { ...tag, id: existing.id } : tag)
+            }
+            return Array.from(byName.values())
           })
           setEntries((previous) => oneEntryPerDate([
             ...previous.filter((entry) => entry.date.slice(0, 7) !== monthKey),
@@ -405,6 +494,13 @@ function App() {
       unlisten = dispose
     })
     return () => unlisten?.()
+  }, [])
+
+  // 启动自检：localStorage 不可写时设置会静默丢失（重开后“又变回待配置”），
+  // 必须第一时间显式告知，而不是让用户以为是配置问题。
+  useEffect(() => {
+    if (checkStorageAvailable()) return
+    setNotice('本机存储不可用：设置无法保存，重启后会恢复默认。请检查应用数据目录/磁盘空间')
   }, [])
 
   useEffect(() => {
@@ -563,13 +659,23 @@ function App() {
     }))
   }
 
+  // 远程直连模式：标签定义属于设置数据库，增改后立即写回远端。
+  function persistTagsRemotely(nextTags: Tag[]) {
+    if (!isRemoteDataSource(settings.dataSource) || getRemoteConfigError(settings)) return
+    void dataSource.syncTags?.(nextTags).catch((error) => {
+      setNotice(error instanceof Error ? error.message : String(error))
+    })
+  }
+
   function addTag(name: string, onAdded?: (tag: Tag) => void) {
     const cleanName = name.trim()
     if (!cleanName) return
     const existing = tags.find((tag) => tag.name.toLowerCase() === cleanName.toLowerCase())
     if (existing) {
       if (existing.retired) {
-        setTags((previous) => previous.map((item) => (item.id === existing.id ? { ...item, retired: false } : item)))
+        const nextTags = tags.map((item) => (item.id === existing.id ? { ...item, retired: false } : item))
+        setTags(nextTags)
+        persistTagsRemotely(nextTags)
       }
       onAdded?.(existing)
       return
@@ -579,7 +685,9 @@ function App() {
       name: cleanName,
       color: TAG_COLORS[tags.length % TAG_COLORS.length],
     }
-    setTags((previous) => [...previous, tag])
+    const nextTags = [...tags, tag]
+    setTags(nextTags)
+    persistTagsRemotely(nextTags)
     onAdded?.(tag)
   }
 
@@ -620,12 +728,16 @@ function App() {
   function retireTag(tagId: string) {
     const tag = tags.find((item) => item.id === tagId)
     if (!tag || tag.retired) return
-    setTags((previous) => previous.map((item) => (item.id === tagId ? { ...item, retired: true } : item)))
+    const nextTags = tags.map((item) => (item.id === tagId ? { ...item, retired: true } : item))
+    setTags(nextTags)
+    persistTagsRemotely(nextTags)
     setNotice(`已停用标签「${tag.name}」，已有记录保持不变`)
   }
 
   function restoreTag(tagId: string) {
-    setTags((previous) => previous.map((item) => (item.id === tagId ? { ...item, retired: false } : item)))
+    const nextTags = tags.map((item) => (item.id === tagId ? { ...item, retired: false } : item))
+    setTags(nextTags)
+    persistTagsRemotely(nextTags)
     setNotice('标签已恢复，可再次选择')
   }
 
@@ -639,7 +751,13 @@ function App() {
           ? '正在写入'
           : remoteDataState === 'deleting'
             ? '正在删除'
-            : '直接写入'
+            : notionSettingsMissing(settings)
+              ? getNotionSettingsTarget(settings).databaseId ? '设置库=日期库' : '未选设置库'
+              : '直接写入'
+  const remoteConfigError = isRemoteDataSource(settings.dataSource) ? getRemoteConfigError(settings) : null
+  const remoteSettingsHint = isRemoteDataSource(settings.dataSource) && !remoteConfigError
+    ? notionSettingsDisabledReason(settings)
+    : null
 
   return (
     <div className={`app-shell ${settings.uiMode === 'drawer' && drawerSlideIn ? 'app-shell--slide-in' : ''}`}>
@@ -705,7 +823,7 @@ function App() {
           <button
             type="button"
             className="data-source-mini data-source-mini--action"
-            title="切换数据源"
+            title={notionSettingsMissing(settings) ? `Notion 可正常读写日历；${notionSettingsDisabledReason(settings) ?? '标签设置暂未同步'}，点击去处理` : '切换数据源'}
             onClick={() => { setSettingsJumpTo('source'); setView('settings') }}
           >
             <span className={'status-dot ' + (isRemoteDataSource(settings.dataSource) ? 'status-dot--ready' : '')} />
@@ -728,6 +846,11 @@ function App() {
               <div className="topbar-actions">
                 <button className="icon-button" aria-label="搜索" title="搜索"><Search size={17} /></button>
                 <button className="icon-button" aria-label="帮助" title="帮助"><CircleHelp size={17} /></button>
+                {isAndroidTauriRuntime() && (
+                  <button className="icon-button" aria-label="设置" title="设置" onClick={() => setView('settings')}>
+                    <Settings2 size={17} />
+                  </button>
+                )}
                 <div className="avatar">M</div>
               </div>
             </header>
@@ -775,6 +898,14 @@ function App() {
                 <button className="primary-button" onClick={() => openDate(today)}><Plus size={16} />记录今天</button>
               </div>
             </section>
+
+            {(remoteConfigError || remoteSettingsHint) && (
+              <div className={'remote-config-banner' + (remoteConfigError ? ' remote-config-banner--error' : '')}>
+                <CircleHelp size={15} />
+                <span>{remoteConfigError ?? remoteSettingsHint}</span>
+                <button type="button" className="text-button" onClick={() => { setSettingsJumpTo('source'); setView('settings') }}>去配置</button>
+              </div>
+            )}
 
             <section className="overview-grid">
               <div className="calendar-column">
@@ -1225,6 +1356,13 @@ function DataSourceIcon({ id }: { id: DataSourceId }) {
 
 type NotionBusyState = 'idle' | 'discovering' | 'checking' | 'searching-pages' | 'creating'
 
+type NotionTestModalState = {
+  status: 'loading' | 'success' | 'error'
+  title: string
+  message: string
+  details?: string[]
+}
+
 type NotionSourceSettingsProps = {
   settings: AppSettings
   onChangeSettings: Dispatch<SetStateAction<AppSettings>>
@@ -1234,23 +1372,31 @@ type NotionSourceSettingsProps = {
 
 function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRemote }: NotionSourceSettingsProps) {
   const [connection, setConnection] = useState<NotionConnectionInfo | null>(null)
+  const [settingsConnection, setSettingsConnection] = useState<NotionSettingsConnectionInfo | null>(null)
   const [discoveredDatasets, setDiscoveredDatasets] = useState<NotionDatasetOption[]>([])
   const [discoveryAttempted, setDiscoveryAttempted] = useState(false)
   const [busy, setBusy] = useState<NotionBusyState>('idle')
   const [createOpen, setCreateOpen] = useState(false)
+  const [createKind, setCreateKind] = useState<'date' | 'settings'>('date')
   const [parentPages, setParentPages] = useState<NotionPageOption[]>([])
   const [parentPageId, setParentPageId] = useState('')
   const [newDatabaseTitle, setNewDatabaseTitle] = useState('')
+  const [testModal, setTestModal] = useState<NotionTestModalState | null>(null)
   const savedDatasets = settings.notionDatasets ?? []
-  const selectedDataset = getActiveNotionDataset(settings)
-  const activeDatabaseId = selectedDataset?.databaseId ?? settings.notionDatabaseId.trim()
-  const activeDataSourceId = selectedDataset?.dataSourceId ?? settings.notionDataSourceId.trim()
+  const dateTarget = getNotionTarget(settings)
+  const settingsTarget = getNotionSettingsTarget(settings)
+  const activeDatabaseId = dateTarget.databaseId
+  const activeDataSourceId = dateTarget.dataSourceId
+  const activeSettingsDatabaseId = settingsTarget.databaseId
+  const activeSettingsDataSourceId = settingsTarget.dataSourceId
   const activeDatasetKey = activeDatabaseId ? notionDatasetKey({ databaseId: activeDatabaseId, dataSourceId: activeDataSourceId }) : ''
+  const activeSettingsDatasetKey = activeSettingsDatabaseId ? notionDatasetKey({ databaseId: activeSettingsDatabaseId, dataSourceId: activeSettingsDataSourceId }) : ''
   const isConfigured = Boolean(settings.notionToken.trim() && activeDatabaseId)
+  const isSettingsConfigured = Boolean(settings.notionToken.trim() && activeSettingsDatabaseId)
   const update = (partial: Partial<AppSettings>) => onChangeSettings((previous) => ({ ...previous, ...partial }))
 
-  function rememberDataset(dataset: NotionDataset) {
-    onChangeSettings((previous) => withNotionDataset(previous, dataset))
+  function rememberDataset(dataset: NotionDataset, role: 'date' | 'settings' = 'date') {
+    onChangeSettings((previous) => withNotionDataset(previous, dataset, role))
   }
 
   function rememberConnection(info: NotionConnectionInfo) {
@@ -1260,6 +1406,15 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
       dataSourceId: info.dataSourceId,
       dataSourceName: info.dataSourceName,
     })
+  }
+
+  function rememberSettingsConnection(info: NotionSettingsConnectionInfo) {
+    rememberDataset({
+      databaseId: info.databaseId,
+      databaseTitle: info.databaseTitle,
+      dataSourceId: info.dataSourceId,
+      dataSourceName: info.dataSourceName,
+    }, 'settings')
   }
 
   async function handleDiscoverDatasets() {
@@ -1281,31 +1436,67 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
     }
   }
 
-  function handleAddDataset(dataset: NotionDatasetOption) {
-    rememberDataset(dataset)
+  function handleAddDataset(dataset: NotionDatasetOption, role: 'date' | 'settings') {
+    const datasetKey = notionDatasetKey(dataset)
+    if (role === 'date' && datasetKey === activeSettingsDatasetKey) {
+      onNotice('这个数据库已是设置数据库；请为日期记录选择另一个数据库')
+      return
+    }
+    if (role === 'settings' && datasetKey === activeDatasetKey) {
+      onNotice('这个数据库已是日期数据库；请为标签设置选择另一个数据库')
+      return
+    }
+    rememberDataset(dataset, role)
     setConnection(null)
-    onNotice(`已添加数据集：${dataset.databaseTitle} / ${dataset.dataSourceName}`)
+    setSettingsConnection(null)
+    onNotice(`已添加并设为${role === 'date' ? '日期' : '设置'}数据库：${dataset.databaseTitle} / ${dataset.dataSourceName}`)
   }
 
   function handleSelectDataset(dataset: NotionDataset) {
+    if (notionDatasetKey(dataset) === activeSettingsDatasetKey) {
+      onNotice('这个数据库已是设置数据库；请为日期记录选择另一个数据库')
+      return
+    }
     update({
       notionDatabaseId: dataset.databaseId,
       notionDataSourceId: dataset.dataSourceId,
     })
     setConnection(null)
-    onNotice(`已切换数据集：${dataset.databaseTitle} / ${dataset.dataSourceName}`)
+    onNotice(`已切换日期数据库：${dataset.databaseTitle} / ${dataset.dataSourceName}`)
+  }
+
+  function handleSelectSettingsDataset(dataset: NotionDataset) {
+    if (notionDatasetKey(dataset) === activeDatasetKey) {
+      onNotice('这个数据库已是日期数据库；请为标签设置选择另一个数据库')
+      return
+    }
+    update({
+      notionSettingsDatabaseId: dataset.databaseId,
+      notionSettingsDataSourceId: dataset.dataSourceId,
+    })
+    setSettingsConnection(null)
+    onNotice(`已切换设置数据库：${dataset.databaseTitle} / ${dataset.dataSourceName}`)
   }
 
   function handleRemoveDataset(dataset: NotionDataset) {
     const nextDatasets = savedDatasets.filter((item) => notionDatasetKey(item) !== notionDatasetKey(dataset))
     const removingActive = notionDatasetKey(dataset) === activeDatasetKey
-    const nextDataset = removingActive ? nextDatasets[0] : undefined
+    const removingSettings = notionDatasetKey(dataset) === activeSettingsDatasetKey
+    const nextDateDataset = removingActive
+      ? nextDatasets.find((item) => notionDatasetKey(item) !== activeSettingsDatasetKey)
+      : undefined
     update({
       notionDatasets: nextDatasets,
       ...(removingActive
         ? {
-            notionDatabaseId: nextDataset?.databaseId ?? '',
-            notionDataSourceId: nextDataset?.dataSourceId ?? '',
+            notionDatabaseId: nextDateDataset?.databaseId ?? '',
+            notionDataSourceId: nextDateDataset?.dataSourceId ?? '',
+          }
+        : {}),
+      ...(removingSettings
+        ? {
+            notionSettingsDatabaseId: '',
+            notionSettingsDataSourceId: '',
           }
         : {}),
     })
@@ -1315,7 +1506,7 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
 
   async function handleCheckConnection() {
     if (!isConfigured) {
-      onNotice('请先填写 Token，点击“发现数据集”并添加一个数据集')
+      onNotice('请先填写 Token，并选择日期数据库')
       return
     }
     setBusy('checking')
@@ -1323,11 +1514,114 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
       const result = await checkNotionConnection(settings.notionToken, activeDatabaseId, activeDataSourceId)
       setConnection(result)
       rememberConnection(result)
-      onNotice(`Notion 已连接：${result.dataSourceName}`)
+      if (!isSettingsConfigured) {
+        setSettingsConnection(null)
+        onNotice(`Notion 日期数据库已连接：${result.dataSourceName}；还未选择设置数据库，标签暂不会保存到 Notion`)
+        return
+      }
+      const settingsResult = await checkNotionSettingsConnection(
+        settings.notionToken,
+        activeSettingsDatabaseId,
+        activeSettingsDataSourceId,
+      )
+      setSettingsConnection(settingsResult)
+      rememberSettingsConnection(settingsResult)
+      onNotice(`Notion 已连接：日期数据库 ${result.dataSourceName} · 设置数据库 ${settingsResult.dataSourceName}`)
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error))
     } finally {
       setBusy('idle')
+    }
+  }
+  async function handleTestToken() {
+    if (!settings.notionToken.trim()) {
+      setTestModal({
+        status: 'error',
+        title: 'Token 测试失败',
+        message: '请先填写 Integration Token，再测试。',
+      })
+      return
+    }
+    setTestModal({
+      status: 'loading',
+      title: '正在测试 Token',
+      message: '正在使用当前 Token 访问 Notion API（/users/me）…',
+    })
+    try {
+      const result = await testNotionToken(settings.notionToken)
+      const details = [
+        result.botName ? `连接名称：${result.botName}` : null,
+        result.workspaceName ? `工作区：${result.workspaceName}` : null,
+      ].filter((item): item is string => Boolean(item))
+      setTestModal({
+        status: 'success',
+        title: 'Token 正常',
+        message: 'Notion API 访问成功，Token 可以正常使用。',
+        details,
+      })
+    } catch (error) {
+      setTestModal({
+        status: 'error',
+        title: 'Token 测试失败',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  async function handleTestDataset() {
+    if (!settings.notionToken.trim()) {
+      setTestModal({
+        status: 'error',
+        title: '数据集测试失败',
+        message: '请先填写 Integration Token，再测试数据集。',
+      })
+      return
+    }
+    if (!activeDatabaseId) {
+      setTestModal({
+        status: 'error',
+        title: '数据集测试失败',
+        message: '请先添加并选择一个日期数据库，再测试数据集。',
+      })
+      return
+    }
+    setTestModal({
+      status: 'loading',
+      title: '正在测试数据集',
+      message: `正在访问 ${activeDatabaseId} 并读取 schema…`,
+    })
+    try {
+      const result = await testNotionDataset(settings.notionToken, activeDatabaseId, activeDataSourceId)
+      const mapping = result.mapping
+      const details = [
+        `数据库：${result.databaseTitle}`,
+        `Data source：${result.dataSourceName}`,
+        `标题字段：${mapping.titleProperty ?? '未识别'}`,
+        `日期字段：${mapping.dateProperty ?? '未识别'}`,
+        `正文字段：${mapping.contentProperty ?? '未配置'}`,
+        `标签字段：${mapping.tagsProperty ?? '未配置'}`,
+      ]
+      if (mapping.ready) {
+        setTestModal({
+          status: 'success',
+          title: '数据集访问正常',
+          message: '已成功读取数据库和字段结构，可以用于日历同步。',
+          details,
+        })
+      } else {
+        setTestModal({
+          status: 'error',
+          title: '数据集可访问，但字段映射不完整',
+          message: mapping.message ?? '数据库缺少 CalendarMark 需要的字段。',
+          details,
+        })
+      }
+    } catch (error) {
+      setTestModal({
+        status: 'error',
+        title: '数据集测试失败',
+        message: error instanceof Error ? error.message : String(error),
+      })
     }
   }
 
@@ -1366,12 +1660,18 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
     }
     setBusy('creating')
     try {
-      const result = await createNotionDatabase(settings.notionToken, parentPageId, newDatabaseTitle.trim())
-      setConnection(result)
-      rememberConnection(result)
+      if (createKind === 'settings') {
+        const result = await createNotionSettingsDatabase(settings.notionToken, parentPageId, newDatabaseTitle.trim())
+        setSettingsConnection(result)
+        rememberSettingsConnection(result)
+      } else {
+        const result = await createNotionDatabase(settings.notionToken, parentPageId, newDatabaseTitle.trim())
+        setConnection(result)
+        rememberConnection(result)
+      }
       setCreateOpen(false)
       setNewDatabaseTitle('')
-      onNotice(`已创建数据库「${result.databaseTitle}」，并自动添加到数据集`)
+      onNotice(`已创建${createKind === 'settings' ? '设置' : '日期'}数据库「${newDatabaseTitle.trim()}」`)
     } catch (error) {
       onNotice(error instanceof Error ? error.message : String(error))
     } finally {
@@ -1409,14 +1709,34 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
       </div>
       <div className="notion-dataset-manager">
         <div className="notion-dataset-header">
-          <div><strong>同步数据集</strong><span>从 Token 可访问的 Notion data source 中选择</span></div>
+          <div><strong>选择两个数据库</strong><span>日期数据库保存每天一条记录；设置数据库保存标签等设置</span></div>
           <div className="notion-dataset-actions">
             <button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleDiscoverDatasets() }}><Search size={14} />{busy === 'discovering' ? '正在发现…' : '发现数据集'}</button>
             <button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { setCreateOpen((open) => !open); if (!createOpen && parentPages.length === 0) void handleSearchParentPages() }}><Plus size={14} />新建数据库</button>
           </div>
         </div>
+        <div className="notion-config-summary">
+          <span><b>Token</b>{settings.notionToken.trim() ? '已保存' : '未填写'}</span>
+          <span>
+            <b>日期数据库</b>
+            {activeDatabaseId
+              ? savedDatasets.find((item) => notionDatasetKey(item) === activeDatasetKey)?.databaseTitle ?? activeDatabaseId
+              : '未选择'}
+          </span>
+          <span>
+            <b>设置数据库</b>
+            {activeSettingsDatabaseId
+              ? savedDatasets.find((item) => notionDatasetKey(item) === activeSettingsDatasetKey)?.databaseTitle ?? activeSettingsDatabaseId
+              : '未选择（标签不同步）'}
+          </span>
+        </div>
         {createOpen && <div className="notion-create-panel">
           <div className="notion-create-fields">
+            <label className="field-label" htmlFor="notion-create-kind"><span>数据库用途</span><span className="field-hint">两种用途会创建不同的属性结构</span></label>
+            <select id="notion-create-kind" className="settings-input" value={createKind} onChange={(event) => setCreateKind(event.target.value === 'settings' ? 'settings' : 'date')}>
+              <option value="date">日期数据库 · 每天一条记录</option>
+              <option value="settings">设置数据库 · 保存标签等设置</option>
+            </select>
             <label className="field-label" htmlFor="notion-parent-page"><span>父页面</span><span className="field-hint">Notion API 要求新数据库必须创建在某个页面下</span></label>
             <div className="notion-parent-row">
               <select id="notion-parent-page" className="settings-input" value={parentPageId} disabled={parentPages.length === 0} onChange={(event) => setParentPageId(event.target.value)}>
@@ -1425,11 +1745,11 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
               </select>
               <button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleSearchParentPages() }}><RefreshCw size={14} className={busy === 'searching-pages' ? 'spin' : ''} />刷新页面</button>
             </div>
-            <label className="field-label" htmlFor="notion-new-database-title"><span>数据库名称</span><span className="field-hint">会自动创建 名称 / 日期 / 内容 / 标签 / 附件 属性</span></label>
-            <input id="notion-new-database-title" className="settings-input" placeholder="例如：CalendarMark 日历" value={newDatabaseTitle} onChange={(event) => setNewDatabaseTitle(event.target.value)} />
+            <label className="field-label" htmlFor="notion-new-database-title"><span>数据库名称</span><span className="field-hint">{createKind === 'date' ? '会自动创建 名称 / 日期 / 内容 / 标签 / 附件 属性' : '会自动创建 名称 / 标签 属性，标签以一条记录保存'}</span></label>
+            <input id="notion-new-database-title" className="settings-input" placeholder={createKind === 'date' ? '例如：CalendarMark 日历' : '例如：CalendarMark 设置'} value={newDatabaseTitle} onChange={(event) => setNewDatabaseTitle(event.target.value)} />
           </div>
           <div className="notion-create-footer">
-            <span className="field-hint">创建后会自动添加为当前数据集</span>
+            <span className="field-hint">创建后会自动设为对应用途的数据库</span>
             <div className="notion-actions">
               <button type="button" className="text-button" onClick={() => setCreateOpen(false)}>取消</button>
               <button type="button" className="primary-button" disabled={busy !== 'idle' || !parentPageId || !newDatabaseTitle.trim()} onClick={() => { void handleCreateDatabase() }}>{busy === 'creating' ? '正在创建…' : '创建数据库'}</button>
@@ -1438,23 +1758,43 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
         </div>}
         {savedDatasets.length > 0
           ? <div className="notion-dataset-list">{savedDatasets.map((dataset) => {
-            const active = notionDatasetKey(dataset) === activeDatasetKey
-            return <div className={'notion-dataset-option' + (active ? ' notion-dataset-option--active' : '')} key={notionDatasetKey(dataset)}>
+            const datasetKey = notionDatasetKey(dataset)
+            const isDate = datasetKey === activeDatasetKey
+            const isSettings = datasetKey === activeSettingsDatasetKey
+            return <div className={'notion-dataset-option' + (isDate || isSettings ? ' notion-dataset-option--active' : '')} key={datasetKey}>
               <button type="button" className="notion-dataset-select" onClick={() => handleSelectDataset(dataset)}>
-                <span className="notion-dataset-copy"><strong>{dataset.databaseTitle}</strong><small>{dataset.dataSourceName}</small><code>{dataset.dataSourceId}</code></span>
-                {active && <span className="notion-dataset-current">当前</span>}
+                <span className="notion-dataset-copy">
+                  <strong>{dataset.databaseTitle}</strong>
+                  <small>{dataset.dataSourceName}</small>
+                  <code>{dataset.dataSourceId}</code>
+                  <span className="notion-role-badges">
+                    {isDate && <span className="notion-role-badge notion-role-badge--date">日期库</span>}
+                    {isSettings && <span className="notion-role-badge notion-role-badge--settings">设置库</span>}
+                  </span>
+                </span>
               </button>
+              <div className="notion-role-actions">
+                <button type="button" className={isDate ? 'primary-button' : 'secondary-button'} disabled={busy !== 'idle' || isSettings} title={isSettings ? '不能与设置数据库相同' : undefined} onClick={() => handleSelectDataset(dataset)}>{isDate ? '日期库' : '设为日期库'}</button>
+                <button type="button" className={isSettings ? 'primary-button' : 'secondary-button'} disabled={busy !== 'idle' || isDate} title={isDate ? '不能与日期数据库相同' : undefined} onClick={() => handleSelectSettingsDataset(dataset)}>{isSettings ? '设置库' : '设为设置库'}</button>
+              </div>
               <button type="button" className="plain-icon-button" aria-label={'移除 ' + dataset.dataSourceName} title="从本机移除" onClick={() => handleRemoveDataset(dataset)}><Trash2 size={14} /></button>
             </div>
           })}</div>
-          : <div className="notion-dataset-empty">还没有添加数据集。点击“发现数据集”读取当前 Token 已授权的 Notion 数据源。</div>}
+          : <div className="notion-dataset-empty">还没有添加数据库。点击“发现数据集”读取当前 Token 已授权的 Notion 数据源。</div>}
+        {settings.notionToken.trim() && activeDatabaseId && activeSettingsDatabaseId && sameNotionStore(settingsTarget, dateTarget) && <div className="notion-dataset-empty notion-dataset-empty--warn">设置库与日期库指向同一份数据（相同 data source）：日历读写不受影响，但标签设置不会写入 Notion。请把另一个数据源或数据库“设为设置库”。</div>}
+        {settings.notionToken.trim() && activeDatabaseId && !activeSettingsDatabaseId && <div className="notion-dataset-empty notion-dataset-empty--warn">还差一步：请把任意数据集“设为设置数据库”，用于保存标签等数据；未选择前日历可正常读写。</div>}
         {discoveredDatasets.length > 0 && <div className="notion-discovered-panel">
-          <div className="notion-discovered-heading"><strong>发现结果</strong><span>添加后会保存在本机，移除不会删除 Notion 内容</span></div>
+          <div className="notion-discovered-heading"><strong>发现结果</strong><span>点击用途即添加到本机并启用，移除不会删除 Notion 内容</span></div>
           <div className="notion-discovered-list">{discoveredDatasets.map((dataset) => {
-            const saved = savedDatasets.some((item) => notionDatasetKey(item) === notionDatasetKey(dataset))
+            const datasetKey = notionDatasetKey(dataset)
+            const isDate = datasetKey === activeDatasetKey
+            const isSettings = datasetKey === activeSettingsDatasetKey
             return <div className="notion-discovered-item" key={notionDatasetKey(dataset)}>
               <div className="notion-discovered-copy"><strong>{dataset.databaseTitle}</strong><small>{dataset.dataSourceName}</small></div>
-              <button type="button" className={saved ? 'secondary-button' : 'primary-button'} disabled={saved || busy !== 'idle'} onClick={() => handleAddDataset(dataset)}>{saved ? '已添加' : '添加数据集'}</button>
+              <div className="notion-role-actions">
+                <button type="button" className={isDate ? 'primary-button' : 'secondary-button'} disabled={busy !== 'idle' || isSettings} title={isSettings ? '不能与设置数据库相同' : undefined} onClick={() => handleAddDataset(dataset, 'date')}>{isDate ? '日期库' : '设为日期库'}</button>
+                <button type="button" className={isSettings ? 'primary-button' : 'secondary-button'} disabled={busy !== 'idle' || isDate} title={isDate ? '不能与日期数据库相同' : undefined} onClick={() => handleAddDataset(dataset, 'settings')}>{isSettings ? '设置库' : '设为设置库'}</button>
+              </div>
             </div>
           })}</div>
         </div>}
@@ -1465,9 +1805,33 @@ function NotionSourceSettings({ settings, onChangeSettings, onNotice, onReloadRe
       </div>
       {connection && connection.dataSources.length > 1 && <div className="notion-data-source-picker"><label className="field-label" htmlFor="notion-data-source"><span>当前 Database 的 data source</span><span className="field-hint">也可以从连接结果切换</span></label><select id="notion-data-source" className="settings-input" value={activeDataSourceId} onChange={(event) => { const source = connection.dataSources.find((item) => item.id === event.target.value); if (!source) return; rememberDataset({ databaseId: connection.databaseId, databaseTitle: connection.databaseTitle, dataSourceId: source.id, dataSourceName: source.name }); setConnection(null) }}>{connection.dataSources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}</select></div>}
       {connection && <div className="notion-connection-panel"><div className="notion-connection-heading"><span><Check size={14} />已连接到 {connection.databaseTitle}</span><small>{connection.dataSourceName}</small></div><div className="notion-mapping-grid"><span>标题：{mapping?.titleProperty ?? '未识别'}</span><span>日期：{mapping?.dateProperty ?? '未识别'}</span><span>正文：{mapping?.contentProperty ?? '未配置'}</span><span>标签：{mapping?.tagsProperty ?? '未配置'}</span><span>附件：{mapping?.filesProperty ?? '未配置'}</span></div>{mapping && !mapping.ready && <div className="notion-mapping-error">{mapping.message}</div>}<div className="notion-schema-list">{connection.properties.map((property) => <span key={`${property.id}-${property.name}`}><b>{property.name}</b><small>{property.propertyType}</small></span>)}</div></div>}
-      <div className="source-card-footer source-card-footer--notion"><span><RefreshCw size={15} className={busy !== 'idle' ? 'spin' : ''} />{busyLabel}</span><div className="notion-actions"><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleCheckConnection() }}><RefreshCw size={15} />检查连接</button><button type="button" className="secondary-button" disabled={busy !== 'idle' || !isConfigured} onClick={() => onReloadRemote?.()}><RefreshCw size={15} />重新读取</button></div></div>
+      {settingsConnection && <div className="notion-connection-panel notion-connection-panel--settings"><div className="notion-connection-heading"><span><Check size={14} />设置数据库已连接：{settingsConnection.databaseTitle}</span><small>{settingsConnection.dataSourceName}</small></div><div className="notion-mapping-grid"><span>名称：{settingsConnection.mapping.nameProperty ?? '未识别'}</span><span>标签数据：{settingsConnection.mapping.dataProperty ?? '未识别'}</span></div>{!settingsConnection.mapping.ready && <div className="notion-mapping-error">{settingsConnection.mapping.message}</div>}<div className="notion-settings-note">标签保存在一条「CalendarMark 标签」记录里；只读取这条记录，不会加载或修改设置库中的其他内容。</div><div className="notion-schema-list">{settingsConnection.properties.map((property) => <span key={`${property.id}-${property.name}`}><b>{property.name}</b><small>{property.propertyType}</small></span>)}</div></div>}
+      <div className="source-card-footer source-card-footer--notion"><span><RefreshCw size={15} className={busy !== 'idle' ? 'spin' : ''} />{busyLabel}</span><div className="notion-actions"><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleTestToken() }}><KeyRound size={15} />测试 Token</button><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleTestDataset() }}><Database size={15} />测试数据集</button><button type="button" className="secondary-button" disabled={busy !== 'idle'} onClick={() => { void handleCheckConnection() }}><RefreshCw size={15} />检查连接</button><button type="button" className="secondary-button" disabled={busy !== 'idle' || !isConfigured} onClick={() => onReloadRemote?.()}><RefreshCw size={15} />重新读取</button></div></div>
     </div>
-    <div className="info-banner"><Sparkles size={16} /><span><strong>远程直连规则：</strong>CalendarMark 启动或切换到 Notion 时自动读取远端数据；保存和删除记录会直接写入 Notion，不会把记录持久化到本机数据文件。Notion 侧有外部改动时，可点击“重新读取”刷新当前数据集。</span></div>
+    <div className="info-banner"><Sparkles size={16} /><span><strong>远程直连规则：</strong>日期数据库每个日期只维护一条记录，编辑会更新对应日期那一条，不会新增；标签定义保存在设置数据库。保存和删除直接写入 Notion，不落本机数据文件。Notion 侧有外部改动时，可点击“重新读取”。</span></div>
+    {testModal && (
+      <div className="notion-test-overlay" role="dialog" aria-modal="true" aria-label={testModal.title} onClick={(event) => { if (event.target === event.currentTarget) setTestModal(null) }}>
+        <div className={'notion-test-modal' + (testModal.status === 'error' ? ' notion-test-modal--error' : testModal.status === 'success' ? ' notion-test-modal--success' : '')}>
+          <div className="notion-test-icon">
+            {testModal.status === 'loading'
+              ? <RefreshCw size={22} className="spin" />
+              : testModal.status === 'success'
+                ? <Check size={22} />
+                : <X size={22} />}
+          </div>
+          <h3>{testModal.title}</h3>
+          <p>{testModal.message}</p>
+          {testModal.details && testModal.details.length > 0 && (
+            <ul className="notion-test-details">
+              {testModal.details.map((item) => <li key={item}>{item}</li>)}
+            </ul>
+          )}
+          <div className="notion-test-actions">
+            <button type="button" className="primary-button" onClick={() => setTestModal(null)}>知道了</button>
+          </div>
+        </div>
+      </div>
+    )}
   </>
 }
 
@@ -1503,6 +1867,7 @@ function LocalSourceSettings({ settings, onChangeSettings, entries, onChangeEntr
     return busySync?.targetId === target.id && busySync.direction === direction
   }
 
+
   function anyBusy(): boolean {
     return busySync !== null
   }
@@ -1523,6 +1888,7 @@ function LocalSourceSettings({ settings, onChangeSettings, entries, onChangeEntr
       } else {
         const result = await target.pushFromLocal(entries, tags)
         onChangeEntries(result.entries)
+        if (result.tags) onChangeTags(result.tags)
         onNotice(formatSyncNotice(`已推送 ${result.pushedCount} 条本地记录到 ${target.label}`, result.warnings))
       }
     } catch (error) {

@@ -147,8 +147,12 @@ export type AppSettings = {
   uiMode: UiMode
   dataSource: DataSourceId
   notionToken: string
+  /** 日期数据库：每个日期一条记录 */
   notionDatabaseId: string
   notionDataSourceId: string
+  /** 设置数据库：保存标签等应用设置 */
+  notionSettingsDatabaseId: string
+  notionSettingsDataSourceId: string
   notionDatasets: NotionDataset[]
   qiniuAccessKey: string
   qiniuSecretKey: string
@@ -182,6 +186,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   notionToken: '',
   notionDatabaseId: '',
   notionDataSourceId: '',
+  notionSettingsDatabaseId: '',
+  notionSettingsDataSourceId: '',
   notionDatasets: [],
   qiniuAccessKey: '',
   qiniuSecretKey: '',

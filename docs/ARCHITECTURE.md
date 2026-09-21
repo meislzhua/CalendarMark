@@ -74,7 +74,7 @@ MVP 本地存储适配层，负责从 `localStorage` 读写：
 
 `loadMonth` 一次并发读取当月全部日期文档，图片附件由 Rust 侧经签名下载链接取回并转为 Data URL 预览；`saveEntry` 先上传新增附件，再写日期文档并增量维护标签索引；`deleteEntry` 删除记录独享的附件对象、重写或删除日期文档并清理失效索引。
 
-Rust 侧 `notion_pull_entries` 接受可选 query（日期区间 + 标签），转换为 Notion query filter 在服务端筛选，分页仍由适配器循环处理；超过单页 100 条的数据集无需全量拉取。心情映射为可选的“心情”select 属性（按属性类型自动识别），推送时写入/清除 select 值，读取时带回 `mood` 字段。
+Rust 侧 `notion_pull_entries` 接受可选 query（日期区间 + 标签），转换为 Notion query filter 在服务端筛选，分页仍由适配器循环处理；超过单页 100 条的数据集无需全量拉取。心情映射为可选的“心情”select 属性（按属性类型自动识别），推送时写入/清除 select 值，读取时带回 `mood` 字段。Notion 配置区分两个数据库：日期数据库按“一天一条”语义保存记录（推送前先按日期查询，有则更新那一条、无则创建，重复页面归档）；设置数据库通过 `notion_pull_settings` / `notion_push_settings` 只维护一条「CalendarMark 标签」记录（rich_text 存 JSON），按标题过滤读取，不加载也不修改设置库中的其他内容。
 
 ### `src/App.tsx`
 

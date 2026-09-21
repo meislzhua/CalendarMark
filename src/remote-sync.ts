@@ -2,6 +2,8 @@ import type { AppSettings, CalendarEntry, EntryRemoteRef, NotionDataset, Tag } f
 import { oneEntryPerDate, QINIU_SOURCE_ENABLED } from './types'
 import {
   mergeNotionRecords,
+  mergeNotionSettingsTags,
+  toNotionTagInput,
   mergeQiniuDayDocuments,
   parseDataUrl,
   QINIU_TAGS_META_KEY,
@@ -16,7 +18,7 @@ import {
   latestQiniuDayRecord,
   type QiniuTarget,
 } from './data-source'
-import { pullNotionEntries, pushNotionEntries } from './notion'
+import { pullNotionEntries, pullNotionSettings, pushNotionEntries, pushNotionSettings } from './notion'
 import type { NotionPushResult } from './notion'
 import {
   getQiniuAttachmentDataUrl,
@@ -44,6 +46,7 @@ export type RemoteSyncPullResult = {
 
 export type RemoteSyncPushResult = {
   entries: CalendarEntry[]
+  tags?: Tag[]
   pushedCount: number
   warnings: string[]
 }
@@ -120,7 +123,23 @@ function createNotionSyncTarget(
   configure?: () => void,
 ): RemoteSyncTarget {
   const id = `notion:${notionDatasetKey(dataset)}`
-  const configured = Boolean(settings.notionToken.trim() && dataset.databaseId && dataset.dataSourceId)
+  const configured = Boolean(
+    settings.notionToken.trim()
+      && dataset.databaseId
+      && dataset.dataSourceId,
+  )
+  const settingsConfigured = Boolean(
+    settings.notionToken.trim()
+      && settings.notionSettingsDatabaseId.trim()
+      && !(
+        settings.notionSettingsDatabaseId.trim() === dataset.databaseId
+        && (
+          !settings.notionSettingsDataSourceId.trim()
+          || !dataset.dataSourceId
+          || settings.notionSettingsDataSourceId.trim() === dataset.dataSourceId
+        )
+      ),
+  )
   const activeKey = `${settings.notionDatabaseId}:${settings.notionDataSourceId}`
   const firstAvailable = !settings.notionDatabaseId.trim() && (settings.notionDatasets ?? [])[0] === dataset
   return {
@@ -130,17 +149,29 @@ function createNotionSyncTarget(
     detail: `${dataset.dataSourceName || 'Notion data source'} · 双向同步`,
     configured,
     active: notionDatasetKey(dataset) === activeKey || firstAvailable,
-    requirement: '需要 Integration Token，并确认数据集已共享给 Integration',
+    requirement: '需要 Integration Token 和日期数据库；选择设置数据库后标签定义也会同步',
     activate,
     configure,
     async pullToLocal(currentEntries, currentTags) {
       const result = await pullNotionEntries(settings.notionToken, dataset.databaseId, dataset.dataSourceId)
-      const merged = mergeNotionRecords(result.entries, currentEntries, currentTags)
+      const settingsResult = settingsConfigured
+        ? await pullNotionSettings(
+            settings.notionToken,
+            settings.notionSettingsDatabaseId,
+            settings.notionSettingsDataSourceId || undefined,
+          )
+        : null
+      const settingsTags = settingsResult
+        ? mergeNotionSettingsTags(settingsResult.tags, currentTags)
+        : currentTags
+      const merged = mergeNotionRecords(result.entries, currentEntries, settingsTags)
       return {
         entries: merged.entries,
         tags: merged.newTags,
         pulledCount: result.entries.length,
-        warnings: result.warnings,
+        warnings: settingsResult
+          ? [...result.warnings, ...settingsResult.warnings]
+          : [...result.warnings, '设置数据库未选择（或与日期数据库相同），本次未同步标签定义。'],
       }
     },
     async pushFromLocal(entries, tags) {
@@ -150,10 +181,21 @@ function createNotionSyncTarget(
         dataset.dataSourceId,
         entries.map((entry) => toNotionEntryInput(entry, tags, dataset.dataSourceId)),
       )
+      const settingsResult = settingsConfigured
+        ? await pushNotionSettings(
+            settings.notionToken,
+            settings.notionSettingsDatabaseId,
+            settings.notionSettingsDataSourceId || undefined,
+            tags.map(toNotionTagInput),
+          )
+        : null
       return {
         entries: applyNotionPushResult(entries, result),
+        tags,
         pushedCount: result.entries.length,
-        warnings: result.warnings,
+        warnings: settingsResult
+          ? [...result.warnings, ...settingsResult.warnings]
+          : [...result.warnings, '设置数据库未选择（或与日期数据库相同），标签定义未写入 Notion。'],
       }
     },
   }

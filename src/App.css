@@ -11,6 +11,7 @@
   --green-deep: #1f5143;
   --green-soft: #e3f1e9;
   --green-tint: #f0f7f2;
+  --accent: #7a5ea8;
   --peach: #f7e6d9;
   --lavender: #ece7f7;
   --sky: #e2eff4;
@@ -36,6 +37,7 @@
   --green-deep: #a5d8bb;
   --green-soft: #253d31;
   --green-tint: #233128;
+  --accent: #b9a7e8;
   --peach: #513d32;
   --lavender: #3e3851;
   --sky: #2f4249;
@@ -1917,6 +1919,31 @@ input::placeholder {
   font-size: 9px;
 }
 
+.notion-config-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface-muted);
+  font-size: 9px;
+  color: var(--ink-muted);
+}
+
+.notion-config-summary span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+
+.notion-config-summary b {
+  flex: 0 0 auto;
+  color: var(--ink-faint);
+  font-weight: 700;
+}
+
 .notion-dataset-list,
 .notion-discovered-list {
   display: grid;
@@ -2001,6 +2028,44 @@ input::placeholder {
   font-weight: 700;
 }
 
+.notion-role-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.notion-role-badge {
+  border-radius: 999px;
+  padding: 3px 6px;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.notion-role-badge--date {
+  background: var(--green-soft);
+  color: var(--green-deep);
+}
+
+.notion-role-badge--settings {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.notion-role-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+}
+
+.notion-role-actions .primary-button,
+.notion-role-actions .secondary-button {
+  min-height: 26px;
+  padding: 0 7px;
+  font-size: 8px;
+  white-space: nowrap;
+}
+
 .notion-dataset-option > .plain-icon-button {
   align-self: center;
   margin-right: 5px;
@@ -2013,6 +2078,11 @@ input::placeholder {
   color: var(--ink-faint);
   font-size: 9px;
   line-height: 1.5;
+}
+
+.notion-dataset-empty--warn {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
 }
 
 .notion-discovered-panel {
@@ -2812,6 +2882,20 @@ input::placeholder {
     flex-direction: column;
   }
 
+  .notion-dataset-option {
+    flex-wrap: wrap;
+  }
+
+  .notion-dataset-option .notion-dataset-select,
+  .notion-dataset-option .notion-role-actions,
+  .notion-discovered-item .notion-role-actions {
+    width: 100%;
+  }
+
+  .notion-role-actions {
+    flex-wrap: wrap;
+  }
+
   .notion-dataset-header .secondary-button,
   .notion-discovered-item .primary-button,
   .notion-discovered-item .secondary-button {
@@ -2907,6 +2991,100 @@ input::placeholder {
 
 .notion-dataset-list--compact .notion-dataset-option {
   padding: 0;
+}
+
+.notion-connection-panel--settings {
+  border-color: color-mix(in srgb, var(--accent) 25%, var(--line));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+
+.notion-settings-note {
+  color: var(--ink-muted);
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+.notion-test-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(22, 30, 26, .42);
+  backdrop-filter: blur(2px);
+}
+
+.notion-test-modal {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  width: min(420px, 100%);
+  max-height: 80vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 22px 20px 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+  text-align: center;
+}
+
+.notion-test-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--ink-muted);
+}
+
+.notion-test-modal--success .notion-test-icon {
+  background: var(--green-soft);
+  color: var(--green-deep);
+}
+
+.notion-test-modal--error .notion-test-icon {
+  background: var(--rose);
+  color: #b4485a;
+}
+
+.notion-test-modal h3 {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.notion-test-modal p {
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.notion-test-details {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: var(--surface-muted);
+  color: var(--ink-muted);
+  font-size: 10px;
+  text-align: left;
+  list-style: none;
+}
+
+.notion-test-actions {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  margin-top: 2px;
 }
 
 .qiniu-bucket-list {
@@ -3122,6 +3300,39 @@ input::placeholder {
   color: var(--ink-faint);
   font-size: 9px;
   line-height: 1.5;
+}
+
+.remote-config-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.remote-config-banner > svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.remote-config-banner > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+.remote-config-banner--error {
+  border-color: color-mix(in srgb, #d8636a 40%, var(--line));
+  background: color-mix(in srgb, #d8636a 8%, var(--surface));
+}
+
+.remote-config-banner--error > svg {
+  color: #d8636a;
 }
 
 
