@@ -10,6 +10,11 @@ const NOTION_VERSION: &str = "2026-03-11";
 const USER_AGENT: &str = "CalendarMark/0.1.0";
 const PAGE_SIZE: u64 = 100;
 const MAX_FILE_BYTES: usize = 5 * 1024 * 1024;
+// Android 移动网络下 DNS / 建连失败比桌面更常见（切换基站、IPv6 抖动、运营商网络拦截）。
+// 客户端必须显式设置超时，否则被丢弃的 SYN 包会让“发现数据集”永远停在加载状态。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -659,7 +664,10 @@ pub async fn notion_search_pages(token: String) -> Result<NotionPageSearchResult
                         continue;
                     }
                 };
-                if pages.iter().any(|item: &NotionPageOption| item.page_id == page_id) {
+                if pages
+                    .iter()
+                    .any(|item: &NotionPageOption| item.page_id == page_id)
+                {
                     continue;
                 }
                 pages.push(NotionPageOption {
@@ -681,7 +689,8 @@ pub async fn notion_search_pages(token: String) -> Result<NotionPageSearchResult
             break;
         }
         let Some(next_cursor_value) = next_cursor else {
-            warnings.push("Notion 返回 has_more=true，但没有 next_cursor，已停止分页。".to_string());
+            warnings
+                .push("Notion 返回 has_more=true，但没有 next_cursor，已停止分页。".to_string());
             break;
         };
         if !seen_cursors.insert(next_cursor_value.clone()) {
@@ -745,8 +754,40 @@ pub async fn notion_create_database(
 fn notion_client() -> Result<Client, String> {
     Client::builder()
         .user_agent(USER_AGENT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .map_err(|error| format!("无法初始化 Notion 网络客户端：{error}"))
+}
+
+/// 展开 `std::error::Error` 的底层原因；reqwest 顶层的 Display 只显示
+/// "error sending request for url (...)"，真正的 DNS/连接错误藏在 source 链里。
+fn root_cause(error: &(dyn std::error::Error + '_)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        message = error.to_string();
+        source = error.source();
+    }
+    message
+}
+
+/// 把网络层失败翻译成用户能定位的提示，并写入日志（Android 上经 tauri-plugin-log 进入 logcat）。
+fn request_error_message(action: &str, error: &reqwest::Error) -> String {
+    let detail = root_cause(error);
+    let mut message = if detail.is_empty() || detail == error.to_string() {
+        format!("{action}：{error}")
+    } else {
+        format!("{action}：{error}（原因：{detail}）")
+    };
+    if error.is_connect() {
+        message.push_str(
+            "。无法建立到 api.notion.com 的连接：请确认设备网络可用；部分网络环境（如中国大陆直连）需要开启代理 / VPN 才能访问 Notion。",
+        );
+    } else if error.is_timeout() {
+        message.push_str("。连接 Notion 超时：请切换 Wi-Fi / 移动数据，或开启代理后重试。");
+    }
+    log::warn!(target: "calendarmark::notion", "{message}");
+    message
 }
 
 async fn connect_notion(
@@ -886,11 +927,7 @@ fn build_mapping(properties: &[PropertyDescriptor]) -> NotionMappingInfo {
         "files",
         &["attachments", "attachment", "files", "file", "附件", "图片"],
     );
-    let mood_property = choose_property(
-        properties,
-        "select",
-        &["mood", "心情", "emotion", "情绪"],
-    );
+    let mood_property = choose_property(properties, "select", &["mood", "心情", "emotion", "情绪"]);
     let ready = title_property.is_some() && date_property.is_some();
     let message = if ready {
         None
@@ -1173,10 +1210,7 @@ async fn build_page_properties(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|mood| json!({ "name": mood }));
-        properties.insert(
-            property_name.to_string(),
-            json!({ "select": mood }),
-        );
+        properties.insert(property_name.to_string(), json!({ "select": mood }));
     }
 
     let mut uploaded_attachments = 0;
@@ -1321,20 +1355,24 @@ async fn upload_attachment(
         .file_name(filename)
         .mime_str(&mime_type)
         .map_err(|error| format!("文件 MIME 类型无效：{error}"))?;
-    let response = client
+    let send_result = client
         .post(upload_url)
         .bearer_auth(token.trim())
         .header("Notion-Version", NOTION_VERSION)
         .header("User-Agent", USER_AGENT)
         .multipart(multipart::Form::new().part("file", part))
+        .timeout(UPLOAD_TIMEOUT)
         .send()
-        .await
-        .map_err(|error| format!("上传文件失败：{error}"))?;
+        .await;
+    let response = match send_result {
+        Ok(response) => response,
+        Err(error) => return Err(request_error_message("上传文件失败", &error)),
+    };
     let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|error| format!("读取文件上传响应失败：{error}"))?;
+        .map_err(|error| request_error_message("读取文件上传响应失败", &error))?;
     if !status.is_success() {
         return Err(format_notion_error(status, &body));
     }
@@ -1403,15 +1441,25 @@ async fn request_json(
         if let Some(body) = payload.clone() {
             request = request.json(&body);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| format!("请求 Notion 失败：{error}"))?;
+        let response = match request.timeout(REQUEST_TIMEOUT).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                let message = request_error_message("请求 Notion 失败", &error);
+                // 只重试“连接没有建立起来”的失败（DNS 抖动、建连被重置 / 超时），
+                // 请求已经发出的失败不重试，避免创建、更新这类非幂等请求重复执行。
+                if error.is_connect() && attempt < 2 {
+                    tokio::time::sleep(Duration::from_millis(350 * 2_u64.pow(attempt as u32)))
+                        .await;
+                    continue;
+                }
+                return Err(message);
+            }
+        };
         let status = response.status();
         let body = response
             .text()
             .await
-            .map_err(|error| format!("读取 Notion 响应失败：{error}"))?;
+            .map_err(|error| request_error_message("读取 Notion 响应失败", &error))?;
         if (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) && attempt < 2 {
             tokio::time::sleep(Duration::from_millis(350 * 2_u64.pow(attempt as u32))).await;
             continue;
@@ -1533,6 +1581,37 @@ fn mime_from_filename(filename: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_cause_walks_to_deepest_error_source() {
+        #[derive(Debug)]
+        struct DeepError(String);
+        impl std::fmt::Display for DeepError {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(formatter, "{}", self.0)
+            }
+        }
+        impl std::error::Error for DeepError {}
+
+        #[derive(Debug)]
+        struct ShallowError(DeepError);
+        impl std::fmt::Display for ShallowError {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(formatter, "shallow failure")
+            }
+        }
+        impl std::error::Error for ShallowError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let error = ShallowError(DeepError("dns lookup failed".to_string()));
+        assert_eq!(root_cause(&error), "dns lookup failed");
+        // 没有底层来源时，应回退到错误自身的描述。
+        let error = DeepError("only failure".to_string());
+        assert_eq!(root_cause(&error), "only failure");
+    }
 
     #[test]
     fn normalizes_notion_ids() {

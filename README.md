@@ -73,6 +73,14 @@ npm run tauri:android:build
 
 仓库的 Android 工程目录暂不提交，GitHub Actions 会在 Android job 中执行 `tauri android init --ci` 后完成 APK/AAB 构建。
 
+### Notion 在 Android 上连不上的排查
+
+Android 版和桌面版走的是同一套实现（同一个 React 设置页 → 同一个 Tauri IPC 命令 → Rust 侧同一个 reqwest 客户端），官方 Android 模板也已声明 `INTERNET` 权限。因此“桌面能发现数据集、Android 不行”通常是设备网络差异，而不是平台实现差异：
+
+- 手机直连的网络如果无法访问 `api.notion.com`（中国大陆直连常见），请求会失败或超时；桌面机可能因为路由器透明代理而正常。请在手机上开启代理 / VPN，或切换到可直连 Notion 的网络后重试。
+- 网络错误会在页面提示“无法建立到 api.notion.com 的连接 / 连接超时”，并附带底层原因；同一信息也会写入 logcat（tag 为 `calendarmark::notion`），可用 `adb logcat -s calendarmark::notion` 查看。
+- Notion 请求设置了 10s 建连超时和 30s 请求超时（附件上传 180s），并对 DNS / 建连类瞬时失败自动重试两次，不会出现按钮永久转圈的情况。
+
 ## GitHub Actions
 
 工作流位于 `.github/workflows/`：
