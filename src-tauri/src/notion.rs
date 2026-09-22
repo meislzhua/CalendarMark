@@ -1318,9 +1318,31 @@ pub async fn notion_create_settings_database(
 }
 
 fn notion_client() -> Result<Client, String> {
-    Client::builder()
+    // `mut` 仅在 Android 分支里重新赋值，桌面端会触发 unused_mut。
+    #[allow(unused_mut)]
+    let mut builder = Client::builder()
         .user_agent(USER_AGENT)
-        .connect_timeout(CONNECT_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT);
+
+    // Android 专属：reqwest 0.13 的 `rustls` 特性用 rustls-platform-verifier
+    // 验证服务器证书。桌面平台它直接读取系统证书库，无需额外步骤；但在
+    // Android 上它必须先用 Application Context 通过 JNI 初始化，并且 APK
+    // 里要打包配套的 Kotlin CertificateVerifier 组件——Tauri 生成的工程
+    // 两者都没有。结果是第一次 TLS 握手就在连接器里 panic，表现为所有
+    // 远程 API 请求直接失败（浏览器访问正常，桌面端也正常）。
+    // 这里改用内置的 Mozilla 根证书（webpki-roots）构建 TLS 配置，完全
+    // 绕开平台验证器，不再依赖 JNI / Kotlin 组件。
+    #[cfg(target_os = "android")]
+    {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        builder = builder.tls_backend_preconfigured(tls);
+    }
+
+    builder
         .build()
         .map_err(|error| format!("无法初始化 Notion 网络客户端：{error}"))
 }
