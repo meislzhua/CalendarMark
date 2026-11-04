@@ -134,17 +134,16 @@ fn build_query_filter(
     let mut conditions = Vec::new();
 
     if let Some(date_property) = mapping.date_property.as_deref() {
-        let mut date_condition = Map::new();
         if let Some(start) = query.date_start.as_deref().filter(|v| !v.trim().is_empty()) {
-            date_condition.insert("on_or_after".to_string(), json!(start));
-        }
-        if let Some(end) = query.date_end.as_deref().filter(|v| !v.trim().is_empty()) {
-            date_condition.insert("before".to_string(), json!(end));
-        }
-        if !date_condition.is_empty() {
             conditions.push(json!({
                 "property": date_property,
-                "date": date_condition
+                "date": { "on_or_after": start }
+            }));
+        }
+        if let Some(end) = query.date_end.as_deref().filter(|v| !v.trim().is_empty()) {
+            conditions.push(json!({
+                "property": date_property,
+                "date": { "before": end }
             }));
         }
     }
