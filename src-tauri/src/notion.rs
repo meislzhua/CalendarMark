@@ -2,8 +2,10 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use reqwest::{multipart, Client, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const NOTION_API_BASE: &str = "https://api.notion.com/v1";
 const NOTION_VERSION: &str = "2026-03-11";
@@ -19,6 +21,10 @@ const NOTION_SETTINGS_PAGE_TITLE: &str = "CalendarMark 标签";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
+/// 连接信息（schema + 属性映射）缓存时长：pull/push 等热路径在 TTL 内
+/// 复用，省掉每次同步前的两个 GET（/databases/{id} + /data_sources/{id}）；
+/// “测试连接 / 检测数据集”这类用户主动操作会强制刷新，保证看到最新 schema。
+const CONNECTION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -476,11 +482,15 @@ pub async fn notion_check_connection(
     data_source_id: Option<String>,
 ) -> Result<NotionConnectionInfo, String> {
     let client = notion_client()?;
-    Ok(
-        connect_notion(&client, &token, &database_id, data_source_id.as_deref())
-            .await?
-            .info,
+    Ok(connect_notion(
+        &client,
+        &token,
+        &database_id,
+        data_source_id.as_deref(),
+        true,
     )
+    .await?
+    .info)
 }
 
 #[tauri::command]
@@ -491,8 +501,14 @@ pub async fn notion_pull_entries(
     query: Option<NotionPullQuery>,
 ) -> Result<NotionPullResult, String> {
     let client = notion_client()?;
-    let connected =
-        connect_notion(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    let connected = connect_notion(
+        &client,
+        &token,
+        &database_id,
+        data_source_id.as_deref(),
+        false,
+    )
+    .await?;
     ensure_mapping_ready(&connected.info.mapping)?;
 
     let mut entries = Vec::new();
@@ -576,8 +592,14 @@ pub async fn notion_push_entries(
     entries: Vec<NotionEntryInput>,
 ) -> Result<NotionPushResult, String> {
     let client = notion_client()?;
-    let connected =
-        connect_notion(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    let connected = connect_notion(
+        &client,
+        &token,
+        &database_id,
+        data_source_id.as_deref(),
+        false,
+    )
+    .await?;
     ensure_mapping_ready(&connected.info.mapping)?;
 
     let mut pushed = Vec::with_capacity(entries.len());
@@ -706,8 +728,14 @@ pub async fn notion_archive_pages_by_date(
     date: String,
 ) -> Result<usize, String> {
     let client = notion_client()?;
-    let connected =
-        connect_notion(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    let connected = connect_notion(
+        &client,
+        &token,
+        &database_id,
+        data_source_id.as_deref(),
+        false,
+    )
+    .await?;
     let pages = query_pages_by_date(&client, &token, &connected, &date).await?;
     let mut archived = 0usize;
     for page in pages {
@@ -1046,7 +1074,7 @@ pub async fn notion_create_database(
         .ok_or_else(|| "Notion 创建数据库成功，但响应中缺少 Database ID。".to_string())?
         .to_string();
 
-    let connected = connect_notion(&client, token, &database_id, None).await?;
+    let connected = connect_notion(&client, token, &database_id, None, true).await?;
     Ok(connected.info)
 }
 
@@ -1057,8 +1085,14 @@ pub async fn notion_check_settings_connection(
     data_source_id: Option<String>,
 ) -> Result<NotionSettingsConnectionInfo, String> {
     let client = notion_client()?;
-    let connected =
-        connect_notion(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    let connected = connect_notion(
+        &client,
+        &token,
+        &database_id,
+        data_source_id.as_deref(),
+        true,
+    )
+    .await?;
     Ok(settings_connection_from(connected.info))
 }
 
@@ -1095,8 +1129,14 @@ pub async fn notion_test_dataset(
     data_source_id: Option<String>,
 ) -> Result<NotionConnectionInfo, String> {
     let client = notion_client()?;
-    let connected =
-        connect_notion(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    let connected = connect_notion(
+        &client,
+        &token,
+        &database_id,
+        data_source_id.as_deref(),
+        true,
+    )
+    .await?;
     Ok(connected.info)
 }
 
@@ -1107,8 +1147,14 @@ pub async fn notion_pull_settings(
     data_source_id: Option<String>,
 ) -> Result<NotionSettingsPullResult, String> {
     let client = notion_client()?;
-    let connection =
-        connect_notion_settings(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    let connection = connect_notion_settings(
+        &client,
+        &token,
+        &database_id,
+        data_source_id.as_deref(),
+        false,
+    )
+    .await?;
     ensure_settings_mapping_ready(&connection.mapping)?;
 
     let mut warnings = Vec::new();
@@ -1185,8 +1231,14 @@ pub async fn notion_push_settings(
     tags: Vec<NotionTagInput>,
 ) -> Result<NotionSettingsPushResult, String> {
     let client = notion_client()?;
-    let connection =
-        connect_notion_settings(&client, &token, &database_id, data_source_id.as_deref()).await?;
+    let connection = connect_notion_settings(
+        &client,
+        &token,
+        &database_id,
+        data_source_id.as_deref(),
+        false,
+    )
+    .await?;
     ensure_settings_mapping_ready(&connection.mapping)?;
 
     let mut warnings = Vec::new();
@@ -1312,11 +1364,32 @@ pub async fn notion_create_settings_database(
         .ok_or_else(|| "Notion 创建数据库成功，但响应中缺少 Database ID。".to_string())?
         .to_string();
 
-    let connected = connect_notion(&client, token, &database_id, None).await?;
+    let connected = connect_notion(&client, token, &database_id, None, true).await?;
     Ok(settings_connection_from(connected.info))
 }
 
+/// 全局复用的 HTTP 客户端。reqwest 的 `Client` 内部就是连接池句柄，
+/// 克隆开销极低；此前每个 Tauri command 各建一个 Client，等于每次同步
+/// 都重新 DNS + TCP + TLS 握手——直连 api.notion.com 高 RTT 下一次握手
+/// 就要 1~2 秒。构建参数是静态的，首次构建失败会被缓存并原样返回
+/// （失败原因不会随时间自行恢复）。
+static NOTION_HTTP_CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+
+/// `connect_notion` 结果的缓存条目，只缓存成功获取的连接信息。
+struct CachedConnection {
+    connected: ConnectedNotion,
+    cached_at: Instant,
+}
+
+/// key 为 (token 指纹, database_id, data_source_id) 的组合，
+/// 全局共享一份；TTL 之外由写入路径顺手清理。
+static CONNECTION_CACHE: OnceLock<Mutex<HashMap<String, CachedConnection>>> = OnceLock::new();
+
 fn notion_client() -> Result<Client, String> {
+    NOTION_HTTP_CLIENT.get_or_init(build_notion_client).clone()
+}
+
+fn build_notion_client() -> Result<Client, String> {
     // `mut` 仅在 Android 分支里重新赋值，桌面端会触发 unused_mut。
     #[allow(unused_mut)]
     let mut builder = Client::builder()
@@ -1344,6 +1417,48 @@ fn notion_client() -> Result<Client, String> {
     builder
         .build()
         .map_err(|error| format!("无法初始化 Notion 网络客户端：{error}"))
+}
+
+/// 用指纹而不是明文 token 拼 key，避免在缓存结构里额外多存一份密钥。
+fn connection_cache_key(token: &str, database_id: &str, data_source_id: Option<&str>) -> String {
+    let mut hasher = DefaultHasher::new();
+    token.hash(&mut hasher);
+    database_id.hash(&mut hasher);
+    data_source_id.unwrap_or_default().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn connection_cache() -> &'static Mutex<HashMap<String, CachedConnection>> {
+    CONNECTION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 读取未过期的缓存；锁被污染时宁可绕过缓存，也不阻塞同步流程。
+fn cached_connection(key: &str) -> Option<ConnectedNotion> {
+    let mut entries = connection_cache().lock().ok()?;
+    match entries.get(key) {
+        Some(entry) if entry.cached_at.elapsed() < CONNECTION_CACHE_TTL => {
+            Some(entry.connected.clone())
+        }
+        _ => {
+            entries.remove(key);
+            None
+        }
+    }
+}
+
+fn store_cached_connection(key: &str, connected: ConnectedNotion) {
+    let Ok(mut entries) = connection_cache().lock() else {
+        return;
+    };
+    // 顺手清掉其他已过期的 key，防止长期运行时缓慢膨胀。
+    entries.retain(|_, entry| entry.cached_at.elapsed() < CONNECTION_CACHE_TTL);
+    entries.insert(
+        key.to_string(),
+        CachedConnection {
+            connected,
+            cached_at: Instant::now(),
+        },
+    );
 }
 
 /// 展开 `std::error::Error` 的底层原因；reqwest 顶层的 Display 只显示
@@ -1382,12 +1497,35 @@ async fn connect_notion(
     token: &str,
     database_id: &str,
     requested_data_source_id: Option<&str>,
+    force_refresh: bool,
 ) -> Result<ConnectedNotion, String> {
     let token = token.trim();
     if token.is_empty() {
         return Err("请先填写 Notion Integration Token。".to_string());
     }
     let database_id = normalize_uuid(database_id, "Notion Database ID")?;
+
+    // 热路径（按月拉取、保存、归档）在 TTL 内直接复用 schema 与映射；
+    // 用户主动的“测试/检测”传 force_refresh=true，始终拉最新状态。
+    let cache_key = connection_cache_key(token, &database_id, requested_data_source_id);
+    if !force_refresh {
+        if let Some(connected) = cached_connection(&cache_key) {
+            return Ok(connected);
+        }
+    }
+
+    let connected =
+        fetch_connected_notion(client, token, database_id, requested_data_source_id).await?;
+    store_cached_connection(&cache_key, connected.clone());
+    Ok(connected)
+}
+
+async fn fetch_connected_notion(
+    client: &Client,
+    token: &str,
+    database_id: String,
+    requested_data_source_id: Option<&str>,
+) -> Result<ConnectedNotion, String> {
     let database = request_json(
         client,
         token,
@@ -1539,8 +1677,16 @@ async fn connect_notion_settings(
     token: &str,
     database_id: &str,
     requested_data_source_id: Option<&str>,
+    force_refresh: bool,
 ) -> Result<NotionSettingsConnectionInfo, String> {
-    let connected = connect_notion(client, token, database_id, requested_data_source_id).await?;
+    let connected = connect_notion(
+        client,
+        token,
+        database_id,
+        requested_data_source_id,
+        force_refresh,
+    )
+    .await?;
     Ok(settings_connection_from(connected.info))
 }
 
@@ -2636,6 +2782,56 @@ mod tests {
 
     fn page(id: &str) -> Value {
         json!({ "id": id })
+    }
+
+    fn connected_fixture(database_id: &str) -> ConnectedNotion {
+        ConnectedNotion {
+            info: NotionConnectionInfo {
+                database_id: database_id.to_string(),
+                database_title: "测试数据库".to_string(),
+                data_source_id: "fedcba98-7654-3210-fedc-ba9876543210".to_string(),
+                data_source_name: "默认数据源".to_string(),
+                data_sources: Vec::new(),
+                properties: Vec::new(),
+                mapping: NotionMappingInfo {
+                    ready: true,
+                    title_property: None,
+                    date_property: None,
+                    content_property: None,
+                    tags_property: None,
+                    files_property: None,
+                    mood_property: None,
+                    message: None,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn connection_cache_key_separates_token_database_and_source() {
+        let base = connection_cache_key("token-a", "database-a", None);
+        assert_eq!(base, connection_cache_key("token-a", "database-a", None));
+        assert_ne!(base, connection_cache_key("token-b", "database-a", None));
+        assert_ne!(base, connection_cache_key("token-a", "database-b", None));
+        assert_ne!(
+            base,
+            connection_cache_key("token-a", "database-a", Some("source-a"))
+        );
+    }
+
+    #[test]
+    fn connection_cache_roundtrip_hits_same_key_only() {
+        // 全局缓存被所有测试共享，用行号构造唯一 key 避免相互干扰。
+        let key = format!("cache-roundtrip-{}", line!());
+        assert!(cached_connection(&key).is_none());
+        store_cached_connection(
+            &key,
+            connected_fixture("01234567-89ab-cdef-0123-456789abcdef"),
+        );
+        let hit = cached_connection(&key).expect("刚写入的缓存应当命中");
+        assert_eq!(hit.info.database_id, "01234567-89ab-cdef-0123-456789abcdef");
+        let other = format!("cache-roundtrip-other-{}", line!());
+        assert!(cached_connection(&other).is_none());
     }
 
     #[test]

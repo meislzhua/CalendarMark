@@ -111,6 +111,7 @@ Rust 侧 `notion_pull_entries` 接受可选 query（日期区间 + 标签），�
 - `POST /file_uploads` + multipart send：上传本地 Data URL 附件并将 file upload ID 写入 files 属性；推送结果会回传每个附件的稳定引用（file upload ID / external 链接），前端保存后再次编辑时优先复用引用，不会重复上传同一文件。
 - `PATCH /pages/{id}` with `in_trash=true`：删除本地远端关联记录时归档页面。
 - 对 429 和 5xx 做最多三次短退避重试，错误消息只返回 Notion 的状态和 message，不输出 Token。
+- 全局复用一个 reqwest `Client`（跨 Tauri command 共享连接池，避免每次同步重新 DNS/TCP/TLS 握手）；`connect_notion` 的 schema/映射结果按 (token 指纹, database, data source) 缓存 5 分钟，按月拉取、保存、归档等热路径命中缓存时跳过前置的 `GET /databases/{id}` 与 `GET /data_sources/{id}`，“测试连接 / 检测数据集”等用户主动操作始终强制刷新。
 
 Android 不创建桌面托盘，相关代码由 `#[cfg(desktop)]` 排除；React 页面和数据模型继续复用。
 
